@@ -12,6 +12,16 @@ use std::process::{Command, Stdio};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn enrich(kind: &str, evidence: &mut BTreeMap<String, String>) {
+    if kind == "bugcheck" {
+        let raw = evidence.get("param1").cloned().unwrap_or_default();
+        let code = raw.split_whitespace().next().unwrap_or("");
+        let value = u64::from_str_radix(code.trim_start_matches("0x").trim_start_matches("0X"), 16).ok();
+        let (name, hint) = value.map(bugcheck).unwrap_or(("an unknown stop code", "Search the web for the stop code."));
+        evidence.insert("StopCode".into(), value.map(|v| format!("0x{v:X}")).unwrap_or_else(|| code.to_string()));
+        evidence.insert("StopName".into(), name.into());
+        evidence.insert("StopHint".into(), hint.into());
+        return;
+    }
     if kind == "service_image" {
         let Some(raw) = evidence.get("ImagePath").cloned() else { return };
         // Kernel drivers have no account; say what they are instead.
@@ -38,6 +48,55 @@ pub fn enrich(kind: &str, evidence: &mut BTreeMap<String, String>) {
         };
         evidence.insert("_harmful".into(), harmful.into());
         evidence.insert("_severity".into(), severity.into());
+    }
+}
+
+/// Official names of common Windows stop codes, with the usual cause.
+pub fn bugcheck(code: u64) -> (&'static str, &'static str) {
+    const DRIVER: &str = "This is usually caused by a faulty or outdated driver.";
+    const MEMORY: &str = "This is often faulty memory or unstable memory settings (XMP/EXPO), sometimes a driver.";
+    const DISK: &str = "This usually points to the drive, its cable or its storage driver.";
+    const GPU: &str = "This comes from the graphics driver or the graphics card.";
+    const HARDWARE: &str = "This points to hardware: CPU, memory, overclocking or overheating.";
+    const SYSTEM: &str = "A critical part of Windows stopped; check the drive and repair system files.";
+    match code {
+        0x0A => ("IRQL_NOT_LESS_OR_EQUAL", DRIVER),
+        0x19 => ("BAD_POOL_HEADER", MEMORY),
+        0x1A => ("MEMORY_MANAGEMENT", MEMORY),
+        0x1E | 0x1000_001E => ("KMODE_EXCEPTION_NOT_HANDLED", DRIVER),
+        0x24 => ("NTFS_FILE_SYSTEM", DISK),
+        0x3B => ("SYSTEM_SERVICE_EXCEPTION", DRIVER),
+        0x3D => ("INTERRUPT_EXCEPTION_NOT_HANDLED", DRIVER),
+        0x4E => ("PFN_LIST_CORRUPT", MEMORY),
+        0x50 => ("PAGE_FAULT_IN_NONPAGED_AREA", MEMORY),
+        0x7A => ("KERNEL_DATA_INPAGE_ERROR", DISK),
+        0x7B => ("INACCESSIBLE_BOOT_DEVICE", DISK),
+        0x7E | 0x1000_007E => ("SYSTEM_THREAD_EXCEPTION_NOT_HANDLED", DRIVER),
+        0x7F => ("UNEXPECTED_KERNEL_MODE_TRAP", HARDWARE),
+        0x8E | 0x1000_008E => ("KERNEL_MODE_EXCEPTION_NOT_HANDLED", DRIVER),
+        0x9F => ("DRIVER_POWER_STATE_FAILURE", DRIVER),
+        0xA0 => ("INTERNAL_POWER_ERROR", DRIVER),
+        0xBE => ("ATTEMPTED_WRITE_TO_READONLY_MEMORY", DRIVER),
+        0xC2 => ("BAD_POOL_CALLER", DRIVER),
+        0xC4 => ("DRIVER_VERIFIER_DETECTED_VIOLATION", DRIVER),
+        0xC5 => ("DRIVER_CORRUPTED_EXPOOL", DRIVER),
+        0xD1 => ("DRIVER_IRQL_NOT_LESS_OR_EQUAL", DRIVER),
+        0xED => ("UNMOUNTABLE_BOOT_VOLUME", DISK),
+        0xEF => ("CRITICAL_PROCESS_DIED", SYSTEM),
+        0xF4 => ("CRITICAL_OBJECT_TERMINATION", SYSTEM),
+        0xFC => ("ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY", DRIVER),
+        0x101 => ("CLOCK_WATCHDOG_TIMEOUT", HARDWARE),
+        0x109 => ("CRITICAL_STRUCTURE_CORRUPTION", MEMORY),
+        0x116 => ("VIDEO_TDR_FAILURE", GPU),
+        0x117 => ("VIDEO_TDR_TIMEOUT_DETECTED", GPU),
+        0x119 => ("VIDEO_SCHEDULER_INTERNAL_ERROR", GPU),
+        0x124 => ("WHEA_UNCORRECTABLE_ERROR", HARDWARE),
+        0x133 => ("DPC_WATCHDOG_VIOLATION", "A driver took too long; often storage or chipset drivers, or SSD firmware."),
+        0x139 => ("KERNEL_SECURITY_CHECK_FAILURE", DRIVER),
+        0x13A => ("KERNEL_MODE_HEAP_CORRUPTION", DRIVER),
+        0x154 => ("UNEXPECTED_STORE_EXCEPTION", DISK),
+        0xC000_021A => ("STATUS_SYSTEM_PROCESS_TERMINATED", SYSTEM),
+        _ => ("a stop code without a common name", "Search the web for the stop code."),
     }
 }
 
@@ -176,6 +235,19 @@ mod tests {
         assert_eq!(image_file(r"\SystemRoot\System32\drivers\acme.sys"), format!(r"{windir}\System32\drivers\acme.sys"));
         assert_eq!(image_file(r"system32\DRIVERS\x.sys"), format!(r"{windir}\system32\DRIVERS\x.sys"));
         assert_eq!(image_file(r"\??\C:\Tools\drv.sys"), r"C:\Tools\drv.sys");
+    }
+
+    #[test]
+    fn bugchecks() {
+        let mut ev = BTreeMap::from([(
+            "param1".to_string(),
+            "0x0000003b (0x0000000080000004, 0xfffff80113f1b1b6, 0xffffd00f671f5950, 0x0000000000000000)".to_string(),
+        )]);
+        enrich("bugcheck", &mut ev);
+        assert_eq!(ev["StopCode"], "0x3B");
+        assert_eq!(ev["StopName"], "SYSTEM_SERVICE_EXCEPTION");
+        assert!(ev["StopHint"].contains("driver"));
+        assert_eq!(bugcheck(0x124).0, "WHEA_UNCORRECTABLE_ERROR");
     }
 
     #[test]

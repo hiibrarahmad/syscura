@@ -47,6 +47,7 @@ impl Store {
         )?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(findings::SCHEMA)?;
+        findings::migrate(&conn)?;
         Ok(Store { conn })
     }
 

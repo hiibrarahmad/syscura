@@ -30,10 +30,22 @@ CREATE TABLE IF NOT EXISTS fix_attempts (
     verified   INTEGER,
     message    TEXT    NOT NULL,
     undo       TEXT,
-    undone     INTEGER NOT NULL DEFAULT 0
+    undone     INTEGER NOT NULL DEFAULT 0,
+    outcome    TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS fix_attempts_finding ON fix_attempts (finding_id);
 ";
+
+/// Brings databases from older versions up to date.
+pub(crate) fn migrate(conn: &rusqlite::Connection) -> Result<()> {
+    let has_outcome: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('fix_attempts') WHERE name = 'outcome'")?
+        .exists([])?;
+    if !has_outcome {
+        conn.execute_batch("ALTER TABLE fix_attempts ADD COLUMN outcome TEXT NOT NULL DEFAULT ''")?;
+    }
+    Ok(())
+}
 
 /// A finding row without the rule-derived text (the agent adds that).
 #[derive(Debug, Clone)]
@@ -124,19 +136,67 @@ impl Store {
             .optional()
     }
 
-    /// Newest first. Without `include_closed`, ignored findings and fixes
-    /// verified more than a day ago are left out.
+    /// Corrects results saved by older versions, which counted "the repair
+    /// tool found nothing wrong" as a fix. Reopens those problems.
+    pub fn repair_old_outcomes(&self) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE fix_attempts SET outcome = 'nothing_found', verified = NULL
+             WHERE outcome = '' AND ok = 1 AND (message LIKE '%did not find any integrity violations%'
+                OR message LIKE '%No component store corruption detected%' OR message LIKE '%found no problems%')",
+            [],
+        )?;
+        // Nothing is running right after the agent starts, so a problem
+        // still marked "fixing" lost its job (the agent was stopped mid-fix).
+        self.conn.execute(
+            "UPDATE findings SET status = 'open' WHERE status = 'fixing'",
+            [],
+        )?;
+        // Older versions kept the progress lines of long repairs in the message.
+        self.conn.execute(
+            "UPDATE fix_attempts SET message = 'Windows Resource Protection did not find any integrity violations.'
+             WHERE message LIKE '%did not find any integrity violations%' AND message LIKE '%!% complete%' ESCAPE '!'",
+            [],
+        )?;
+        // ...and sometimes only those lines, without the result.
+        self.conn.execute(
+            "UPDATE fix_attempts SET outcome = 'unclear', verified = NULL,
+               message = 'An older Syscura version could not read the result. Run it again to see what it found.'
+             WHERE outcome = '' AND ok = 1 AND message LIKE '%!% complete%' ESCAPE '!'",
+            [],
+        )?;
+        self.conn.execute(
+            "UPDATE findings SET status = 'open' WHERE status IN ('fixed', 'fixing') AND id IN
+               (SELECT finding_id FROM fix_attempts a WHERE a.outcome IN ('nothing_found', 'unclear')
+                AND a.id = (SELECT MAX(id) FROM fix_attempts WHERE finding_id = a.finding_id))",
+            [],
+        )?;
+        Ok(n)
+    }
+
+    /// Newest first. Without `include_closed`, ignored findings and
+    /// problems whose fix was confirmed more than a day ago are left out.
     pub fn findings(&self, include_closed: bool, limit: u32) -> Result<Vec<FindingRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, rule_id, grp, first_ts, last_ts, count, status, evidence FROM findings
              ORDER BY last_ts DESC LIMIT ?1",
         )?;
         let day_ago = syscura_core::now_ms() - 24 * 60 * 60 * 1000;
-        let rows = stmt.query_map([limit], row_to_finding)?;
+        let rows: Vec<FindingRow> = stmt.query_map([limit], row_to_finding)?.collect::<Result<_>>()?;
         let mut out = Vec::new();
-        for row in rows {
-            let f = row?;
-            let closed = f.status == FindingStatus::Ignored || (f.status == FindingStatus::Fixed && f.last_ts < day_ago);
+        for f in rows {
+            // Hide a fixed problem only once its fix was confirmed and has
+            // stayed fixed for a day (not by the age of the event).
+            let fix_confirmed_long_ago = f.status == FindingStatus::Fixed
+                && self
+                    .conn
+                    .query_row(
+                        "SELECT ts, verified FROM fix_attempts WHERE finding_id = ?1 ORDER BY id DESC LIMIT 1",
+                        [f.id],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<bool>>(1)?)),
+                    )
+                    .optional()?
+                    .is_some_and(|(ts, verified)| verified == Some(true) && ts < day_ago);
+            let closed = f.status == FindingStatus::Ignored || fix_confirmed_long_ago;
             if include_closed || !closed {
                 out.push(f);
             }
@@ -146,9 +206,9 @@ impl Store {
 
     pub fn add_attempt(&self, finding_id: i64, a: &FixAttempt) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO fix_attempts (finding_id, ts, fix_index, label, automatic, ok, verified, message, undo)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![finding_id, a.ts, a.fix_index as i64, a.label, a.automatic, a.ok, a.verified, a.message, a.undo],
+            "INSERT INTO fix_attempts (finding_id, ts, fix_index, label, automatic, ok, verified, message, undo, outcome)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![finding_id, a.ts, a.fix_index as i64, a.label, a.automatic, a.ok, a.verified, a.message, a.undo, a.outcome],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -173,7 +233,7 @@ impl Store {
     pub fn attempt(&self, attempt_id: i64) -> Result<Option<(i64, FixAttempt)>> {
         self.conn
             .query_row(
-                "SELECT finding_id, id, ts, fix_index, label, automatic, ok, verified, message, undo, undone
+                "SELECT finding_id, id, ts, fix_index, label, automatic, ok, verified, message, undo, undone, outcome
                  FROM fix_attempts WHERE id = ?1",
                 [attempt_id],
                 |r| Ok((r.get(0)?, row_to_attempt(r, 1)?)),
@@ -183,7 +243,7 @@ impl Store {
 
     pub fn attempts(&self, finding_id: i64) -> Result<Vec<FixAttempt>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, ts, fix_index, label, automatic, ok, verified, message, undo, undone
+            "SELECT id, ts, fix_index, label, automatic, ok, verified, message, undo, undone, outcome
              FROM fix_attempts WHERE finding_id = ?1 ORDER BY id DESC LIMIT 20",
         )?;
         let rows = stmt.query_map([finding_id], |r| row_to_attempt(r, 0))?;
@@ -235,6 +295,7 @@ fn row_to_attempt(r: &rusqlite::Row<'_>, o: usize) -> rusqlite::Result<FixAttemp
         message: r.get(o + 7)?,
         undo: r.get(o + 8)?,
         undone: r.get(o + 9)?,
+        outcome: r.get(o + 10)?,
     })
 }
 
@@ -243,7 +304,21 @@ mod tests {
     use super::*;
 
     fn attempt(ok: bool) -> FixAttempt {
-        FixAttempt { id: 0, ts: 5, fix_index: 0, label: "Start it".into(), automatic: true, ok, verified: None, message: "done".into(), undo: None, undone: false }
+        FixAttempt { id: 0, ts: 5, fix_index: 0, label: "Start it".into(), automatic: true, ok, verified: None, message: "done".into(), undo: None, undone: false, outcome: "fixed".into() }
+    }
+
+    #[test]
+    fn old_databases_get_the_outcome_column() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE fix_attempts (id INTEGER PRIMARY KEY, finding_id INTEGER, ts INTEGER, fix_index INTEGER,
+             label TEXT, automatic INTEGER, ok INTEGER, verified INTEGER, message TEXT, undo TEXT, undone INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap(); // idempotent
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('fix_attempts') WHERE name = 'outcome'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]

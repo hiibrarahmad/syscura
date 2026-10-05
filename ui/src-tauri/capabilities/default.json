@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main window: core features and opening part source pages in the browser.",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": ["core:default", "opener:default", "notification:default"]
 }

@@ -32,6 +32,7 @@ fn main() -> ExitCode {
             Request::Events { limit, max_level }
         }
         Some("hw") => Request::Hardware { refresh: args.iter().any(|a| a == "--refresh") },
+        Some("actions") => Request::Actions,
         Some("problems") => Request::Findings { include_closed: args.iter().any(|a| a == "--all") },
         Some(cmd @ ("fix" | "undo" | "ignore")) => {
             let num = |i: usize| args.get(i).and_then(|n| n.parse::<i64>().ok());
@@ -64,6 +65,11 @@ fn main() -> ExitCode {
         Response::Hardware(hw) => print_hardware(&hw),
         Response::Findings(f) => print_findings(&f),
         Response::Done(msg) => println!("{msg}"),
+        Response::Actions(list) => {
+            for a in list {
+                println!("{:<26} {:?}  {}", a.id, a.risk, a.description);
+            }
+        }
         Response::Error(e) => {
             eprintln!("Agent error: {e}");
             return ExitCode::FAILURE;
@@ -128,6 +134,9 @@ fn print_findings(findings: &[Finding]) {
         for a in f.attempts.iter().take(2) {
             let state = match (a.ok, a.verified) {
                 (false, _) => "failed",
+                _ if a.outcome == "nothing_found" => "found nothing wrong",
+                _ if a.outcome == "not_repaired" => "not repaired",
+                _ if a.outcome == "unclear" => "result unclear",
                 (true, Some(true)) => "worked",
                 (true, Some(false)) => "did not hold",
                 (true, None) => "verifying",

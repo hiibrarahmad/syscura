@@ -1,0 +1,33 @@
+name: 🔬 Wrong or missing hardware info
+description: Syscura shows a part wrong, says "Not reported" for something your PC has, or misses a part.
+labels: ["hardware-info"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Syscura runs on thousands of different PCs and laptops, and every maker reports parts a little differently. Your report makes it more accurate for everyone with the same hardware.
+        Tip: on the **Hardware** page press **Copy report** and paste it below. It contains part names and versions only, no personal files. Remove anything you would rather not share.
+  - type: input
+    id: part
+    attributes:
+      label: Which part is wrong or missing?
+      placeholder: "Memory: speed shows 2133 MT/s, my RAM runs at 3600"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What is actually in your PC?
+      description: For example from the box, the maker's website, BIOS or Task Manager.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Hardware report (Copy report)
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Syscura version
+      placeholder: "0.1.0-beta.2"

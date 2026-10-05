@@ -1,202 +1,207 @@
 <script lang="ts">
-  import PartImage from "../lib/PartImage.svelte";
-  import { api, driveSize, duration, fmtSensor, gb, mb, tempTone } from "../lib/api";
-  import type { Finding, HardwareInfo, PartImage as PartImageT, Sensor, StatusInfo, UsbDevice } from "../lib/types";
+  import { ai } from "../lib/ai.svelte";
   import { needsAttention } from "../lib/findings";
-  import { portKey, usbPanels } from "../lib/prefs.svelte";
+  import { nav } from "../lib/nav.svelte";
+  import { api, ago, duration, gb, mb } from "../lib/api";
+  import type { Finding, HardwareInfo, Sensor, StatusInfo } from "../lib/types";
 
   let {
     hw,
     fromAgent,
     status,
     sensors,
-    images,
     findings,
-    onopen,
     onproblems,
+    onhardware,
+    onsettings,
   }: {
     hw: HardwareInfo | null;
     fromAgent: boolean;
     status: StatusInfo | null;
     sensors: Sensor[];
-    images: PartImageT[];
     findings: Finding[];
-    onopen: (partId: string) => void;
     onproblems: () => void;
+    onhardware: () => void;
+    onsettings: () => void;
   } = $props();
 
-  const img = (key: string) => images.find((i) => i.key === key);
-  const temp = (at: string) => sensors.find((s) => s.site.at === at && s.kind === "temperature");
-  const gpuTemp = $derived(temp("gpu"));
-  const cpuTemp = $derived(temp("cpu"));
-  const cpuLoad = $derived(sensors.find((s) => s.site.at === "cpu" && s.kind === "load"));
-  const cpuClock = $derived(sensors.find((s) => s.site.at === "cpu" && s.kind === "clock"));
-  const panelText = (u: UsbDevice) => {
-    const p = usbPanels[portKey(u.hub, u.port)] ?? u.panel;
-    return p === "back" ? "rear panel" : p === "front" ? "case front" : p === "internal" ? "internal" : "port not set";
-  };
+  const find = (at: string, kind: string) => sensors.find((s) => s.site.at === at && s.kind === kind);
+  const cpuTemp = $derived(find("cpu", "temperature"));
+  const cpuLoad = $derived(find("cpu", "load"));
+  const gpuTemp = $derived(find("gpu", "temperature"));
+  const gpuLoad = $derived(find("gpu", "load"));
+
+  const SEV: Record<string, number> = { critical: 0, error: 1, warning: 2, info: 3, verbose: 4 };
+  const attention = $derived(
+    findings
+      .filter(needsAttention)
+      .sort((a, b) => (a.harmful === "yes" ? 0 : 1) - (b.harmful === "yes" ? 0 : 1) || SEV[a.severity] - SEV[b.severity]),
+  );
+  const handling = $derived(findings.filter((f) => f.status === "fixing"));
+  const fixed = $derived(findings.filter((f) => f.status === "fixed"));
+  const routine = $derived(findings.filter((f) => f.status === "open" && !needsAttention(f)));
+  const badDisks = $derived(hw?.disks.filter((d) => d.health !== "Healthy" && d.health !== "Unknown") ?? []);
+  const lowSpace = $derived(hw?.volumes.filter((v) => !v.removable && v.size_bytes > 0 && v.free_bytes / v.size_bytes < 0.1) ?? []);
+  const ram = $derived(hw?.memory.sticks.reduce((a, s) => a + s.capacity_bytes, 0) || hw?.memory.usable_bytes || 0);
+
+  const words = ["No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"];
+  const headline = $derived.by(() => {
+    if (!status) return { lead: "Protection is off.", em: "Start it to watch your PC." };
+    const n = attention.length + badDisks.length;
+    const serious = attention.some((f) => f.harmful === "yes") || badDisks.length > 0;
+    const lead = serious ? "Your PC needs attention." : n ? "Your PC is mostly healthy." : "Your PC is healthy.";
+    return { lead, em: n === 0 ? "Nothing needs you." : `${words[n] ?? n} ${n === 1 ? "thing needs" : "things need"} you.` };
+  });
+
+  const name = $derived(
+    hw
+      ? (hw.system.model ? [hw.system.manufacturer, hw.system.model].filter(Boolean).join(" ") : "") ||
+          [hw.board.manufacturer, hw.board.product].filter(Boolean).join(" ") ||
+          "This PC"
+      : "",
+  );
+  const today = new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+  const drives = $derived.by(() => {
+    if (!hw) return "—";
+    if (badDisks.length) return `${badDisks.length} need${badDisks.length === 1 ? "s" : ""} a look`;
+    const n = hw.disks.length;
+    return n === 1 ? "Healthy" : n === 2 ? "Both healthy" : `All ${n} healthy`;
+  });
+
+  function openProblem(id: number) {
+    nav.problem = id;
+    onproblems();
+  }
+
   let agentMsg = $state("");
   let agentBusy = $state(false);
   async function agentAction(fn: () => Promise<string>) {
     agentBusy = true;
     try { agentMsg = await fn(); } catch (e) { agentMsg = String(e); } finally { agentBusy = false; }
   }
-  const hottestDisk = $derived(
-    sensors.filter((s) => s.site.at === "disk" && s.value != null).sort((a, b) => (b.value ?? 0) - (a.value ?? 0))[0],
-  );
-  const attention = $derived(findings.filter(needsAttention));
-  const harmful = $derived(attention.filter((f) => f.harmful === "yes"));
-  const unhealthyDisks = $derived(hw?.disks.filter((d) => d.health !== "Healthy") ?? []);
-  const ramTotal = $derived(hw?.memory.sticks.reduce((a, s) => a + s.capacity_bytes, 0) ?? 0);
-
-  const verdict = $derived.by(() => {
-    if (unhealthyDisks.length) return { tone: "danger", text: `${unhealthyDisks.length} drive${unhealthyDisks.length > 1 ? "s" : ""} need attention` };
-    if (harmful.length) return { tone: "danger", text: `${harmful.length} harmful problem${harmful.length > 1 ? "s" : ""} found` };
-    if (!status) return { tone: "warn", text: "Background protection is not running" };
-    if (attention.length) return { tone: "warn", text: `${attention.length} thing${attention.length > 1 ? "s" : ""} worth a look` };
-    return { tone: "ok", text: "Your PC looks healthy" };
-  });
 </script>
 
-<div class="ov">
-  <section class="hero card">
-    <div class="hero-pic">
-      <PartImage image={img("board")} kind="board" size={200} cover />
+<div class="grid-hero" style="flex: 1">
+  <section class="panel">
+    <div style="display: flex; flex-direction: column; gap: 14px">
+      <span class="eyebrow">{today}{hw?.os.last_boot_ms ? ` · PC started ${ago(hw.os.last_boot_ms)}` : ""}</span>
+      <h1 class="headline">{headline.lead} <em>{headline.em}</em></h1>
     </div>
-    <div class="hero-text">
-      <span class="pill t-{verdict.tone}">{verdict.text}</span>
-      <h1>{hw?.board.product ?? "Reading your hardware…"}</h1>
-      {#if hw}
-        <p class="muted">
-          {hw.cpus[0]?.name.replace(/\s+\d+-Core Processor\s*$/i, "")} · {gb(ramTotal)} {hw.memory.sticks[0]?.kind} ·
-          {hw.gpus.find((g) => g.vendor)?.name ?? "integrated graphics"} · {hw.system.os}
-        </p>
+    <div class="tasks">
+      {#if !status}
+        <div class="task">
+          <span class="ring ring--bad"></span>
+          <div><h3>Start background protection</h3><p>Problems are not being watched or fixed while it is off.</p></div>
+          <button class="btn" disabled={agentBusy} onclick={() => agentAction(api.startAgent)}>Start</button>
+        </div>
       {/if}
-      <div class="tiles">
-        <div class="tile">
-          <span class="k">CPU</span>
-          {#if cpuTemp}
-            <span class="v t-{tempTone(cpuTemp.value)}">{fmtSensor(cpuTemp)}</span>
-            <span class="s">temperature{cpuLoad ? ` · ${fmtSensor(cpuLoad)} load` : ""}</span>
-          {:else}
-            <span class="v t-ok">{cpuLoad ? fmtSensor(cpuLoad) : "—"}</span>
-            <span class="s">load{cpuClock ? ` · ${(cpuClock.value! / 1000).toFixed(2)} GHz` : ""}</span>
-          {/if}
+      {#each badDisks as d}
+        <div class="task">
+          <span class="ring ring--bad"></span>
+          <div><h3>{d.model} reports “{d.health}”</h3><p>Back up your files from this drive now.</p></div>
+          <button class="btn" onclick={onhardware}>Details</button>
         </div>
-        <div class="tile">
-          <span class="k">GPU</span>
-          <span class="v t-{tempTone(gpuTemp?.value)}">{gpuTemp ? fmtSensor(gpuTemp) : "—"}</span>
-          <span class="s">{gpuTemp ? "temperature" : "no reading"}</span>
+      {/each}
+      {#each attention.slice(0, 4) as f (f.id)}
+        <div class="task">
+          <span class="ring ring--bad"></span>
+          <div><h3>{f.title}</h3><p>{f.explanation}</p></div>
+          <button class={f.harmful === "yes" ? "btn" : "btn btn--ghost"} onclick={() => openProblem(f.id)}>{f.fixes.length ? "Fix" : "See why"}</button>
         </div>
-        <div class="tile">
-          <span class="k">Drives</span>
-          <span class="v t-{hottestDisk ? tempTone(hottestDisk.value) : unhealthyDisks.length ? 'danger' : 'ok'}">{hottestDisk ? fmtSensor(hottestDisk) : unhealthyDisks.length ? "Check" : "Healthy"}</span>
-          <span class="s">{hottestDisk ? "hottest drive" : `${hw?.disks.length ?? 0} drives`}</span>
+      {/each}
+      {#if attention.length > 4}
+        <div class="task task--quiet">
+          <span class="ring ring--quiet"></span>
+          <div><h3>{attention.length - 4} more</h3><p>Smaller things worth a look when you have time.</p></div>
+          <button class="link" onclick={onproblems}>Show</button>
         </div>
-        <button class="tile link" onclick={onproblems}>
-          <span class="k">Problems</span>
-          <span class="v t-{harmful.length ? 'danger' : attention.length ? 'warn' : 'ok'}">{status ? attention.length : "—"}</span>
-          <span class="s">{status ? (harmful.length ? `${harmful.length} harmful · open the list` : "need a look · open the list") : "agent offline"}</span>
-        </button>
-      </div>
+      {/if}
+      {#each handling as f (f.id)}
+        <div class="task">
+          <span class="ring ring--watch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 6v6l4 2" /></svg></span>
+          <div><h3>{f.title}</h3><p>Syscura is fixing this now and will check the result.</p></div>
+          <span class="muted" style="font-size: 13px">Working</span>
+        </div>
+      {/each}
+      {#if lowSpace.length}
+        <div class="task">
+          <span class="ring ring--watch"></span>
+          <div><h3>{lowSpace.map((v) => v.letter).join(", ")} almost full</h3><p>Less than 10% free space. Windows slows down and updates can fail.</p></div>
+          <button class="btn btn--ghost" onclick={onhardware}>Details</button>
+        </div>
+      {/if}
+      {#if fixed.length}
+        <div class="task task--quiet">
+          <span class="ring ring--ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L19 7" /></svg></span>
+          <div><h3>{fixed.length} fixed</h3><p>{fixed.slice(0, 2).map((f) => f.title).join(" · ")}</p></div>
+          <button class="link" onclick={onproblems}>Show</button>
+        </div>
+      {/if}
+      {#if routine.length}
+        <div class="task task--quiet">
+          <span class="ring ring--ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L19 7" /></svg></span>
+          <div><h3>{routine.length} routine Windows message{routine.length === 1 ? "" : "s"}</h3><p>Logged on every PC. Nothing to do.</p></div>
+          <button class="link" onclick={onproblems}>Show</button>
+        </div>
+      {/if}
     </div>
   </section>
 
-  {#if hw}
-    <section class="parts">
-      <button class="part card" onclick={() => onopen("cpu")}>
-        <PartImage image={img("cpu:0")} kind="cpu" size={56} />
-        <div><small>Processor</small><b>{hw.cpus[0]?.name.replace(/\s+\d+-Core Processor\s*$/i, "")}</b><span class="muted">{hw.cpus[0]?.cores} cores · {hw.cpus[0]?.threads} threads · {hw.cpus[0]?.socket}</span></div>
-      </button>
-      {#each hw.gpus.filter((g) => g.vendor) as g, i}
-        <button class="part card" onclick={() => onopen(`gpu:${hw.gpus.indexOf(g)}`)}>
-          <PartImage image={img(`gpu:${hw.gpus.indexOf(g)}`)} kind="gpu" size={56} />
-          <div><small>Graphics</small><b>{g.name}</b><span class="muted">{gb(g.vram_bytes)} · {g.board_partner || g.vendor}</span></div>
-        </button>
-      {/each}
-      {#each [...new Set(hw.memory.sticks.map((s) => s.part_number))] as pn}
-        {@const group = hw.memory.sticks.filter((s) => s.part_number === pn)}
-        <button class="part card" onclick={() => onopen(`dimm:${group[0].slot}`)}>
-          <PartImage image={img(`ram:${pn}`)} kind="ram" size={56} />
-          <div><small>Memory</small><b>{group.length} × {gb(group[0].capacity_bytes)} {group[0].kind}</b><span class="muted">{group[0].manufacturer} {pn} · {group.map((s) => s.slot).join(", ")}</span></div>
-        </button>
-      {/each}
-      {#each hw.disks as d}
-        <button class="part card" onclick={() => onopen(`disk:${d.device_id}`)}>
-          <PartImage image={img(`disk:${d.device_id}`)} kind="disk" size={56} />
-          <div><small>{d.media === "Unknown" ? "Drive" : d.media} · {d.bus}</small><b>{d.model}</b><span class="muted">{driveSize(d.size_bytes)} · <span class:bad={d.health !== "Healthy"}>{d.health}</span></span></div>
-        </button>
-      {/each}
-      {#each hw.usb.filter((u) => u.kind !== "Hub") as u}
-        <button class="part card" onclick={() => onopen(`usb:${u.instance_id}`)}>
-          <PartImage image={img(`usb:${u.instance_id}`)} kind="usb" size={56} />
-          <div><small>USB · {panelText(u)}</small><b>{u.name}</b><span class="muted">{u.kind}</span></div>
-        </button>
-      {/each}
-    </section>
-
-    <section class="foot">
-      <div class="card agent">
-        <h3>Background protection</h3>
-        {#if status}
-          <p><span class="dot ok"></span>Running for {duration(status.uptime_secs)} · using <b>{mb(status.working_set_bytes)}</b> of RAM · {status.events_total} events logged</p>
-          <p class="faint">Watching: {status.sensors.join(", ")}</p>
-        {:else}
-          <p><span class="dot warn"></span>Background protection is off, so problems are not being watched.</p>
-          <div class="btns">
-            <button class="primary" disabled={agentBusy} onclick={() => agentAction(api.startAgent)}>Start protection</button>
-          </div>
-        {/if}
-        {#if status}
-          <div class="btns">
-            <button disabled={agentBusy} onclick={() => agentAction(api.installService)} title="Starts with Windows and can apply fixes that need admin rights">Install as a Windows service…</button>
-          </div>
-        {/if}
-        {#if agentMsg}<p class="faint">{agentMsg}</p>{/if}
-        {#if !fromAgent}<p class="faint">Hardware was read by this window (drive temperatures need the service).</p>{/if}
+  <section class="panel panel--brand">
+    <div style="display: flex; justify-content: space-between; align-items: baseline">
+      <span>Right now</span><span class="mono" style="font-size: 12px; color: var(--on-brand-faint)">LIVE · 2 s</span>
+    </div>
+    <div class="metrics">
+      <div class="metric">
+        <span>Processor</span>
+        {#if cpuLoad?.value != null}<span class="big-num">{Math.round(cpuLoad.value)}<small>%</small></span>
+        {:else if cpuTemp?.value != null}<span class="big-num">{Math.round(cpuTemp.value)}<small>°C</small></span>
+        {:else}<span class="big-num">—</span>{/if}
       </div>
-      {#if hw.notes.length}
-        <div class="card notes">
-          <h3>Good to know</h3>
-          {#each hw.notes as n}<p>{n}</p>{/each}
-        </div>
-      {/if}
-    </section>
-  {/if}
+      <div class="metric">
+        <span>Graphics</span>
+        {#if gpuTemp?.value != null}<span class="big-num">{Math.round(gpuTemp.value)}<small>°C</small></span>
+        {:else if gpuLoad?.value != null}<span class="big-num">{Math.round(gpuLoad.value)}<small>%</small></span>
+        {:else}<span class="big-num">—</span>{/if}
+      </div>
+      <div class="metric"><span>Memory</span><span class="big-num">{ram ? gb(ram).replace(" GB", "") : "—"}<small> GB installed</small></span></div>
+      <div class="metric"><span>Drives</span><span class="big-num" style="font-size: 30px; letter-spacing: -0.03em">{drives}</span></div>
+    </div>
+    {#if hw}
+      <button class="pc" onclick={onhardware}>
+        <b>{name}</b>
+        <span class="muted">{[hw.cpus[0]?.name.trim(), hw.gpus[0]?.name, ram ? `${gb(ram)} ${hw.memory.sticks[0]?.kind ?? ""}`.trim() : ""].filter(Boolean).join(" · ")}</span>
+        <span class="muted">{hw.os.name}{hw.os.version ? ` ${hw.os.version}` : ""} · build {hw.os.build}</span>
+      </button>
+    {/if}
+  </section>
 </div>
 
+<footer class="footer">
+  <span>
+    {#if status}
+      Running in the background for {duration(status.uptime_secs)} · {mb(status.working_set_bytes)} of memory · watching {status.sensors.length} logs{#if !fromAgent} · drive temperature and wear appear once it runs as a service{/if}
+    {:else}
+      Background protection is off
+    {/if}
+    {#if agentMsg} · {agentMsg}{/if}
+  </span>
+  <span class="right">
+    {#if ai.status.configured}
+      <span>AI help: {ai.status.model} · {ai.status.auto_fix ? "fixes safe problems itself" : "suggests fixes"}</span>
+    {:else}
+      <button class="link" onclick={onsettings}>Set up free AI help</button>
+    {/if}
+    {#if status}<button class="link" disabled={agentBusy} onclick={() => agentAction(api.installService)}>Install as a Windows service</button>{/if}
+  </span>
+</footer>
+
 <style>
-  .ov { display: flex; flex-direction: column; gap: 14px; height: 100%; overflow-y: auto; padding-right: 4px; }
-  .hero { display: flex; gap: 20px; padding: 18px; align-items: stretch; }
-  .hero-pic { width: 300px; flex: none; }
-  .hero-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-  h1 { margin: 2px 0 0; font-size: 26px; letter-spacing: -0.01em; }
-  .hero-text p { margin: 0; }
-  .pill { align-self: flex-start; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--ok); }
-  .pill.t-warn { background: rgba(244, 183, 64, 0.12); color: var(--warn); }
-  .pill.t-danger { background: rgba(255, 92, 108, 0.12); color: var(--danger); }
-  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: auto; padding-top: 10px; }
-  .tile { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; }
-  .tile.link { text-align: left; cursor: pointer; font: inherit; color: inherit; }
-  .tile.link:hover { border-color: var(--accent); }
-  .tile .k { font-size: 11.5px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; }
-  .tile .v { font-size: 24px; font-weight: 650; }
-  .tile .s { font-size: 12px; color: var(--muted); }
-  .t-ok { color: var(--ok); } .t-warn { color: var(--warn); } .t-danger { color: var(--danger); } .t-none { color: var(--muted); }
-  .parts { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
-  .part { display: flex; gap: 12px; align-items: center; padding: 10px; text-align: left; cursor: pointer; }
-  .part:hover { border-color: var(--accent); }
-  .part div { display: flex; flex-direction: column; min-width: 0; }
-  .part small { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; }
-  .part b { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .part .muted { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .bad { color: var(--danger); }
-  .foot { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .foot .card { padding: 14px 16px; }
-  .foot h3 { margin: 0 0 6px; font-size: 13px; }
-  .foot p { margin: 4px 0; font-size: 13px; }
-  .btns { display: flex; gap: 8px; margin: 8px 0 2px; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .dot.warn { background: var(--warn); }
+  .task p { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .pc { margin-top: auto; display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; text-align: left; background: none; border: 0; border-radius: 0; padding: 0; color: inherit; }
+  .pc b { font-weight: 600; }
+  .pc:hover { border: 0; }
+  .pc:hover b { text-decoration: underline; }
+  .right { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  .footer .link { font-size: 13px; }
 </style>

@@ -2,36 +2,28 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { api } from "./lib/api";
-  import type { HardwareInfo, PartImage, Sensor, StatusInfo } from "./lib/types";
+  import { ai, autoCheck, autoStep, refreshAi } from "./lib/ai.svelte";
+  import { needsAttention } from "./lib/findings";
+  import type { Finding, HardwareInfo, Sensor, StatusInfo } from "./lib/types";
   import Overview from "./views/Overview.svelte";
+  import Problems from "./views/Problems.svelte";
   import Hardware from "./views/Hardware.svelte";
   import Events from "./views/Events.svelte";
-  import Problems from "./views/Problems.svelte";
-  import { needsAttention } from "./lib/findings";
-  import type { Finding } from "./lib/types";
+  import Settings from "./views/Settings.svelte";
+  import Backup from "./views/Backup.svelte";
+  import { backupFirst, isCritical, notifyNew } from "./lib/warnings";
 
-  type View = "overview" | "problems" | "hardware" | "events";
+  type View = "overview" | "problems" | "hardware" | "events" | "backup" | "settings";
   let view = $state<View>("overview");
   let hw = $state<HardwareInfo | null>(null);
   let fromAgent = $state(false);
   let status = $state<StatusInfo | null>(null);
   let sensors = $state<Sensor[]>([]);
-  let images = $state<PartImage[]>([]);
-  let selected = $state<string | null>(null);
+  let findings = $state<Finding[]>([]);
   let scanning = $state(false);
   let error = $state("");
-  let findings = $state<Finding[]>([]);
-  let agentUp = $state(false);
   const problemCount = $derived(findings.filter(needsAttention).length);
-  async function refreshProblems() {
-    try {
-      findings = await api.findings(false);
-      agentUp = true;
-    } catch {
-      findings = [];
-      agentUp = false;
-    }
-  }
+  const critical = $derived(findings.filter(isCritical));
 
   async function scan(refresh: boolean) {
     scanning = true;
@@ -41,7 +33,6 @@
       fromAgent = v.from_agent;
       sensors = v.hw.sensors;
       error = "";
-      refreshImages();
     } catch (e) {
       error = String(e);
     } finally {
@@ -52,6 +43,13 @@
   async function refreshStatus() {
     try { status = await api.agentStatus(); } catch { status = null; }
   }
+  async function refreshProblems() {
+    try {
+      findings = await api.findings(false);
+      notifyNew(findings);
+      autoCheck(findings);
+    } catch { findings = []; }
+  }
   async function refreshSensors() {
     if (!hw) return;
     try {
@@ -61,92 +59,86 @@
       sensors = [...hw.sensors.filter((s) => !liveSources.has(s.source)), ...live];
     } catch { /* keep last readings */ }
   }
-  async function refreshImages() {
-    try { images = await api.partImages(); } catch { /* ignore */ }
-  }
 
   onMount(() => {
     invoke<string | null>("initial_view").then((v) => {
-      if (v === "overview" || v === "problems" || v === "hardware" || v === "events") view = v;
+      if (v === "overview" || v === "problems" || v === "hardware" || v === "events" || v === "backup" || v === "settings") view = v;
     }).catch(() => {});
-    scan(false);
+    // Fresh hardware read on every start, so the report is always current.
+    scan(true);
     refreshStatus();
     refreshProblems();
+    refreshAi();
     const a = setInterval(() => { refreshStatus(); refreshProblems(); }, 5000);
     const b = setInterval(refreshSensors, 2000);
-    const c = setInterval(() => {
-      if (images.some((i) => i.status === "queued" || i.status === "searching") || images.length === 0) refreshImages();
-    }, 3000);
+    // Automatic AI help: at most one problem a minute (free limits are small).
+    const c = setInterval(() => autoStep(findings).then(refreshProblems), 60000);
     return () => { clearInterval(a); clearInterval(b); clearInterval(c); };
   });
 
-  function openPart(id: string) {
-    selected = id;
-    view = "hardware";
-  }
-
-  const nav: { id: View; label: string; icon: string }[] = [
-    { id: "overview", label: "Overview", icon: "M3 12l9-8 9 8M5 10v10h5v-6h4v6h5V10" },
-    { id: "problems", label: "Problems", icon: "M12 3l9 16H3zM12 10v4M12 17h.01" },
-    { id: "hardware", label: "Hardware", icon: "M4 4h16v16H4zM9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" },
-    { id: "events", label: "Events", icon: "M4 6h16M4 12h16M4 18h10" },
+  const nav: { id: View; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "problems", label: "Problems" },
+    { id: "hardware", label: "Hardware" },
+    { id: "events", label: "Events" },
+    { id: "backup", label: "Backup" },
+    { id: "settings", label: "Settings" },
   ];
+  const go = (v: View) => { view = v; window.scrollTo({ top: 0 }); };
 </script>
 
-<div class="shell">
-  <nav class="side">
-    <div class="brand">
-      <svg viewBox="0 0 1024 1024" width="30" height="30" aria-hidden="true">
-        <rect x="32" y="32" width="960" height="960" rx="220" fill="#0f2a2c" />
-        <path d="M512 262l196 72v150c0 132-84 232-196 280-112-48-196-148-196-280V334z" fill="#3fe0b8" />
-        <path d="M352 520h88l38-74 58 150 40-104 32 28h64" fill="none" stroke="#062022" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" />
-      </svg>
-      <span>Syscura</span>
-    </div>
-    {#each nav as n}
-      <button class="nav" class:on={view === n.id} onclick={() => (view = n.id)}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d={n.icon} /></svg>
-        {n.label}
-        {#if n.id === "problems" && problemCount > 0}<span class="badge">{problemCount}</span>{/if}
-      </button>
-    {/each}
-    <div class="grow"></div>
-    <div class="agent">
-      <span class="dot" class:ok={!!status}></span>
-      <span>{status ? "Protection on" : "Agent offline"}</span>
-    </div>
-  </nav>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><img src="/logo.svg" alt="" />Syscura</div>
+    <nav class="tabs" aria-label="Main">
+      {#each nav as n}
+        <button aria-current={view === n.id ? "page" : undefined} onclick={() => go(n.id)}>
+          {n.label}{#if n.id === "problems" && problemCount > 0}<span class="count">&nbsp;· {problemCount}</span>{/if}
+        </button>
+      {/each}
+    </nav>
+    <span class="status" title={ai.status.configured ? (ai.status.auto_fix ? "AI fixes safe problems automatically" : "AI suggests fixes") : "AI help is not set up"}>
+      <span class="dot" class:off={!status}></span>{status ? "Protection on" : "Protection off"}
+    </span>
+  </header>
 
-  <main>
-    {#if error && !hw}
-      <div class="card errorbox"><b>Could not read the hardware.</b><p class="muted">{error}</p><button onclick={() => scan(true)}>Try again</button></div>
-    {:else if view === "overview"}
-      <Overview {hw} {fromAgent} {status} {sensors} {images} {findings} onopen={openPart} onproblems={() => (view = "problems")} />
-    {:else if view === "hardware" && hw}
-      <Hardware {hw} {sensors} {images} bind:selected onrescan={() => scan(true)} onimages={refreshImages} {scanning} />
-    {:else if view === "problems"}
-      <Problems />
-    {:else if view === "events"}
-      <Events />
-    {:else}
-      <p class="muted">Reading your hardware…</p>
-    {/if}
-  </main>
+  {#if critical.length && view !== "backup"}
+    <section class="critical">
+      <span class="pill pill--bad">{critical.length === 1 ? "Serious problem" : `${critical.length} serious problems`}</span>
+      <div class="ctext">
+        <b>{critical.length === 1 ? critical[0].title : critical.map((c) => c.title).slice(0, 2).join(" · ")}</b>
+        <span class="muted">{critical.some(backupFirst) ? "Back up your important files now, then follow the steps on the Problems page." : "See the Problems page for what it means and what to do."}</span>
+      </div>
+      {#if critical.some(backupFirst)}<button class="btn" onclick={() => go("backup")}>Back up my files now</button>{/if}
+      <button onclick={() => go("problems")}>What to do</button>
+    </section>
+  {/if}
+
+  {#if error && !hw}
+    <section class="panel"><b>Could not read the hardware.</b><p class="muted">{error}</p><button onclick={() => scan(true)}>Try again</button></section>
+  {:else if view === "overview"}
+    <Overview {hw} {fromAgent} {status} {sensors} {findings}
+      onproblems={() => go("problems")} onhardware={() => go("hardware")} onsettings={() => go("settings")} />
+  {:else if view === "problems"}
+    <Problems />
+  {:else if view === "hardware" && hw}
+    <Hardware {hw} {sensors} {fromAgent} onrescan={() => scan(true)} {scanning} />
+  {:else if view === "events"}
+    <Events />
+  {:else if view === "backup"}
+    <Backup />
+  {:else if view === "settings"}
+    <Settings />
+  {:else}
+    <p class="muted">Reading your PC…</p>
+  {/if}
 </div>
 
 <style>
-  .shell { display: flex; height: 100%; }
-  .side { width: 200px; flex: none; background: var(--bg-2); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; padding: 16px 12px; }
-  .brand { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; padding: 0 6px 18px; }
-  .nav { display: flex; align-items: center; gap: 10px; background: none; border: 1px solid transparent; text-align: left; padding: 8px 10px; border-radius: 9px; color: var(--muted); }
-  .nav:hover { color: var(--text); background: var(--panel); border-color: transparent; }
-  .nav.on { background: var(--panel); color: var(--text); border-color: var(--line); }
-  .nav.on svg { color: var(--accent); }
-  .grow { flex: 1; }
-  .badge { margin-left: auto; background: var(--warn); color: #241a00; font-size: 11px; font-weight: 700; border-radius: 99px; padding: 0 7px; line-height: 18px; }
-  .agent { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); padding: 8px 10px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  main { flex: 1; min-width: 0; padding: 18px; overflow: hidden; }
-  .errorbox { padding: 20px; max-width: 520px; }
+  .app { max-width: 1440px; margin: 0 auto; }
+  .brand img { width: 30px; height: 30px; }
+  .dot.off { background: var(--warn); }
+  .critical { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; background: var(--panel); border-radius: var(--r-panel); padding: 18px 24px; box-shadow: inset 0 0 0 1px var(--bad-bg); }
+  .ctext { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+  .ctext b { font-weight: 600; font-size: 15.5px; }
 </style>

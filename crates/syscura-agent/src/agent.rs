@@ -49,6 +49,10 @@ pub fn run(data_dir: PathBuf, tx: Sender<Msg>, rx: Receiver<Msg>, console: bool)
     let db_path = data_dir.join("syscura.db");
     let store =
         Store::open(&db_path).map_err(|e| format!("cannot open {}: {e}", db_path.display()))?;
+    match store.repair_old_outcomes() {
+        Ok(0) | Err(_) => {}
+        Ok(n) => log::info(&format!("corrected {n} older fix result(s) that had found nothing to repair")),
+    }
     let mut engine = Engine::builtin()?;
     let queries = engine.subscriptions();
 

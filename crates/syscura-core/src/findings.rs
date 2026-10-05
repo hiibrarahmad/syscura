@@ -64,6 +64,21 @@ impl FindingStatus {
     }
 }
 
+/// One action from the agent's fixed list. This catalog is the only menu
+/// anything (rules, the AI, the user) can choose fixes from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionInfo {
+    pub id: String,
+    pub label: String,
+    /// What it does, for people and for the AI.
+    pub description: String,
+    pub risk: Risk,
+    /// Parameter names it accepts (values are validated by the agent).
+    pub params: Vec<String>,
+    pub undoable: bool,
+    pub needs_admin: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixOption {
     pub index: usize,
@@ -91,6 +106,10 @@ pub struct FixAttempt {
     /// Present when the change can be undone.
     pub undo: Option<String>,
     pub undone: bool,
+    /// "fixed", "nothing_found" (the tool found nothing wrong, so this was
+    /// not the cause) or "not_repaired" (it found damage it could not fix).
+    #[serde(default)]
+    pub outcome: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +125,9 @@ pub struct Finding {
     pub harmful: Harm,
     pub explanation: String,
     pub advice: String,
+    /// Windows' own message text for the latest event, when available.
+    #[serde(default)]
+    pub message: String,
     pub first_ts: i64,
     pub last_ts: i64,
     pub count: u64,
@@ -114,4 +136,7 @@ pub struct Finding {
     pub evidence: BTreeMap<String, String>,
     pub fixes: Vec<FixOption>,
     pub attempts: Vec<FixAttempt>,
+    /// A good web search for this exact problem.
+    #[serde(default)]
+    pub search: String,
 }

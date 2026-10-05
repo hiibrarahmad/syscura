@@ -27,8 +27,9 @@ body:
       label: Which part of Syscura?
       options:
         - Problems / fixes
-        - Hardware view or real photo
-        - Part pictures
+        - Hardware information
+        - AI help or web help
+        - Backup
         - Background agent / service
         - Installing or starting
         - Command line

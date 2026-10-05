@@ -1,44 +1,40 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { Finding, HardwareView, PartImage, Sensor, StatusInfo, StoredEvent } from "./types";
+import type {
+  ActionInfo, AiStatus, Analysis, BackupInfo, Finding, HardwareView, Question, Sensor, StatusInfo, StoredEvent,
+} from "./types";
 
 export const api = {
   agentStatus: () => invoke<StatusInfo | null>("agent_status"),
   events: (limit: number, errorsOnly: boolean) => invoke<StoredEvent[]>("events", { limit, errorsOnly }),
   hardware: (refresh: boolean) => invoke<HardwareView>("hardware", { refresh }),
   liveSensors: () => invoke<Sensor[]>("live_sensors"),
-  partImages: () => invoke<PartImage[]>("part_images"),
-  partImageData: (key: string) => invoke<string | null>("part_image_data", { key }),
-  retryPartImage: (key: string) => invoke<void>("retry_part_image", { key }),
-  setPartImageUrl: (key: string, url: string) => invoke<void>("set_part_image_url", { key, url }),
-  setPartImageBytes: (key: string, bytes: number[], fileName: string) =>
-    invoke<void>("set_part_image_bytes", { key, bytes, fileName }),
-  open: (url: string) => openUrl(url),
   findings: (includeClosed: boolean) => invoke<Finding[]>("findings", { includeClosed }),
   runFix: (finding: number, fix: number) => invoke<string>("run_fix", { finding, fix }),
   undoFix: (attempt: number) => invoke<string>("undo_fix", { attempt }),
   ignoreFinding: (finding: number, ignore: boolean) => invoke<string>("ignore_finding", { finding, ignore }),
+  actions: () => invoke<ActionInfo[]>("actions"),
+  applyAction: (a: { finding: number | null; title: string; action: string; params: Record<string, string>; label: string; automatic: boolean }) =>
+    invoke<string>("apply_action", a),
+  aiStatus: () => invoke<AiStatus>("ai_status"),
+  aiSaveKey: (key: string) => invoke<string>("ai_save_key", { key }),
+  aiForgetKey: () => invoke<void>("ai_forget_key"),
+  aiSetAutoFix: (enabled: boolean) => invoke<void>("ai_set_auto_fix", { enabled }),
+  aiAsk: (question: Question) => invoke<Analysis>("ai_ask", { question }),
+  webPrompt: (question: Question) => invoke<string>("web_prompt", { question }),
+  backupInfo: () => invoke<BackupInfo>("backup_info"),
+  backupStart: (destination: string, folders: string[]) => invoke<string>("backup_start", { destination, folders }),
   startAgent: () => invoke<string>("start_agent"),
   installService: () => invoke<string>("install_service"),
+  open: (url: string) => openUrl(url),
 };
-
-// Picture data URLs, cached by key + version so polling stays cheap.
-const imageCache = new Map<string, string>();
-export async function imageData(img: PartImage): Promise<string | null> {
-  const id = `${img.key}@${img.version}`;
-  const hit = imageCache.get(id);
-  if (hit) return hit;
-  const data = await api.partImageData(img.key);
-  if (data) imageCache.set(id, data);
-  return data;
-}
 
 export function gb(bytes: number, digits = 0): string {
   const g = bytes / 1024 ** 3;
   return g >= 1000 ? `${(g / 1024).toFixed(1)} TB` : `${g.toFixed(digits)} GB`;
 }
 
-// Drive makers count in decimal gigabytes; show what the box says.
+// Drive makers count in decimal units; show what the box says.
 export function driveSize(bytes: number): string {
   const g = bytes / 1e9;
   return g >= 1000 ? `${(g / 1000).toFixed(g >= 10000 ? 0 : 1)} TB` : `${Math.round(g)} GB`;
@@ -57,8 +53,10 @@ export function ago(ms: number): string {
 }
 
 export function duration(secs: number): string {
-  const h = Math.floor(secs / 3600);
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
   return h > 0 ? `${h}h ${m}m` : `${m}m ${secs % 60}s`;
 }
 

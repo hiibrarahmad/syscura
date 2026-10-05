@@ -39,10 +39,7 @@ const GENERIC: &[&str] = &[
     "HID-compliant device",
 ];
 
-/// `desktop`: on a desktop, every port that is not on the rear I/O panel
-/// reaches the case through an internal header, so firmware values such as
-/// "top" are reported as the case's front panel.
-pub fn devices(con: &WMIConnection, desktop: bool) -> Vec<UsbDevice> {
+pub fn devices(con: &WMIConnection) -> Vec<UsbDevice> {
     let entities: Vec<PnpEntity> = query(
         con,
         "SELECT PNPDeviceID, PNPClass, Manufacturer FROM Win32_PnPEntity \
@@ -70,7 +67,9 @@ pub fn devices(con: &WMIConnection, desktop: bool) -> Vec<UsbDevice> {
         }
         let panel = prop_bytes(node, &DEVPKEY_Device_PhysicalDeviceLocation)
             .map(|pld| parse::pld_panel(&pld))
-            .map(|p| if desktop { parse::desktop_panel(p) } else { p })
+            // Many boards leave the panel field at its default; only an
+            // explicit front or back is worth showing.
+            .map(parse::desktop_panel)
             .unwrap_or_default();
         out.push(UsbDevice {
             name,

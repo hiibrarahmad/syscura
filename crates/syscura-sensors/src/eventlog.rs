@@ -5,11 +5,14 @@
 //! (built from the rules) runs inside the Event Log service, so Syscura
 //! only ever sees events it cares about.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::{Mutex, OnceLock};
 
 use syscura_core::{Event, Level, now_ms};
 use windows::Win32::System::EventLog::{
-    EVT_HANDLE, EVT_SUBSCRIBE_NOTIFY_ACTION, EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath,
+    EVT_HANDLE, EVT_SUBSCRIBE_NOTIFY_ACTION, EvtClose, EvtFormatMessage, EvtFormatMessageEvent, EvtNext,
+    EvtOpenPublisherMetadata, EvtQuery, EvtQueryChannelPath,
     EvtQueryForwardDirection, EvtRender, EvtRenderEventXml, EvtSubscribe, EvtSubscribeActionDeliver,
     EvtSubscribeToFutureEvents,
 };
@@ -87,7 +90,11 @@ unsafe extern "system" fn callback(
 }
 
 fn to_event(event: EVT_HANDLE, channel: &str) -> Option<Event> {
-    let p = render_xml(event).and_then(|xml| parse_event_xml(&xml))?;
+    let mut p = render_xml(event).and_then(|xml| parse_event_xml(&xml))?;
+    // Windows' own readable text for the event, kept with the data.
+    if let Some(msg) = format_message(&p.provider, event) {
+        p.data.insert("_message".into(), msg);
+    }
     Some(Event {
         ts: p.time_ms.unwrap_or_else(now_ms),
         source: "eventlog".into(),
@@ -138,6 +145,49 @@ pub fn history(channel: &str, query: &str, days: u32, max: usize) -> windows::co
     }
     let _ = unsafe { EvtClose(handle) };
     Ok(out)
+}
+
+/// Publisher metadata handles, opened once per provider (0 = not available).
+fn publishers() -> &'static Mutex<HashMap<String, isize>> {
+    static P: OnceLock<Mutex<HashMap<String, isize>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The event's message as Event Viewer shows it, from the provider's own
+/// message table. Long messages are cut to 2000 characters.
+fn format_message(provider: &str, event: EVT_HANDLE) -> Option<String> {
+    if provider.is_empty() {
+        return None;
+    }
+    let handle = {
+        let mut map = publishers().lock().unwrap_or_else(|e| e.into_inner());
+        *map.entry(provider.to_string()).or_insert_with(|| {
+            unsafe { EvtOpenPublisherMetadata(None, &HSTRING::from(provider), None, 0, 0) }
+                .map(|h| h.0)
+                .unwrap_or(0)
+        })
+    };
+    if handle == 0 {
+        return None;
+    }
+    let publisher = EVT_HANDLE(handle);
+    let mut used = 0u32;
+    let _ = unsafe { EvtFormatMessage(Some(publisher), Some(event), 0, None, EvtFormatMessageEvent.0, None, &mut used) };
+    if used == 0 || used > 64 * 1024 {
+        return None;
+    }
+    let mut buf = vec![0u16; used as usize];
+    unsafe { EvtFormatMessage(Some(publisher), Some(event), 0, None, EvtFormatMessageEvent.0, Some(&mut buf), &mut used) }
+        .ok()?;
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let text = String::from_utf16_lossy(&buf[..len]).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(match text.char_indices().nth(2000) {
+        Some((i, _)) => format!("{}…", &text[..i]),
+        None => text,
+    })
 }
 
 fn render_xml(event: EVT_HANDLE) -> Option<String> {

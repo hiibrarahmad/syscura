@@ -119,6 +119,19 @@ pub enum Request {
     Undo { attempt: i64 },
     /// Ignore (or stop ignoring) a finding.
     Ignore { finding: i64, ignore: bool },
+    /// The fixed list of actions fixes can use.
+    Actions,
+    /// Run one action from the catalog, e.g. chosen by the AI. `finding`
+    /// attaches it to an existing problem; otherwise a problem titled
+    /// `title` is created. Automatic requests may only use safe actions.
+    ApplyAction {
+        finding: Option<i64>,
+        title: String,
+        action: String,
+        params: BTreeMap<String, String>,
+        label: String,
+        automatic: bool,
+    },
     /// Ask a console-mode agent to exit (used before installing the
     /// service). Refused when running as a service.
     Shutdown,
@@ -131,6 +144,7 @@ pub enum Response {
     Events(Vec<StoredEvent>),
     Hardware(Box<hw::HardwareInfo>),
     Findings(Vec<findings::Finding>),
+    Actions(Vec<findings::ActionInfo>),
     Done(String),
     Error(String),
 }

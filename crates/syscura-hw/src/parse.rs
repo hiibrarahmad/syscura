@@ -1,7 +1,7 @@
 //! Pure helpers that turn raw firmware/WMI values into readable facts.
 //! No OS calls here, so everything is unit-tested on any platform.
 
-use syscura_core::hw::{FormFactor, Panel};
+use syscura_core::hw::Panel;
 
 /// SMBIOS chassis type -> short description.
 pub fn chassis_name(t: u64) -> &'static str {
@@ -46,39 +46,6 @@ pub fn slot_lanes(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Best guess at the board's form factor from its product name, slot
-/// counts and chassis.
-pub fn guess_form_factor(product: &str, pcie_slots: usize, dimm_slots: u32, laptop: bool) -> FormFactor {
-    if laptop {
-        return FormFactor::Laptop;
-    }
-    let p = product.to_ascii_uppercase();
-    if p.contains("ITX") || p.ends_with("-I") || p.contains("-I ") {
-        return FormFactor::MiniItx;
-    }
-    if p.contains("E-ATX") || p.contains("EATX") {
-        return FormFactor::Eatx;
-    }
-    if p.contains("MATX") || p.contains("M-ATX") || has_chipset_m_suffix(&p) {
-        return FormFactor::MicroAtx;
-    }
-    match (pcie_slots, dimm_slots) {
-        (0, 0) => FormFactor::Unknown,
-        (0..=1, 0..=2) => FormFactor::MiniItx,
-        _ => FormFactor::Atx,
-    }
-}
-
-/// Chipset names like "B550M" or "H610M" mark micro-ATX boards.
-fn has_chipset_m_suffix(p: &str) -> bool {
-    let b = p.as_bytes();
-    b.windows(5).any(|w| {
-        matches!(w[0], b'A' | b'B' | b'H' | b'X' | b'Z' | b'Q')
-            && w[1..4].iter().all(u8::is_ascii_digit)
-            && w[4] == b'M'
-    })
-}
-
 /// Decodes the panel from an ACPI `_PLD` buffer (byte 8: bit 0 = user
 /// visible, bits 3-5 = panel). Firmware that never filled the buffer leaves
 /// it zeroed, which would read as "top"; that is reported as unknown.
@@ -118,6 +85,149 @@ pub fn memory_form(code: u64) -> &'static str {
         8 => "DIMM",
         12 => "SODIMM",
         13 => "SRIMM",
+        _ => "",
+    }
+}
+
+/// Windows 11 still reports "Windows 10 ..." as ProductName; build 22000
+/// and later is Windows 11.
+pub fn windows_name(product_name: &str, build: &str) -> String {
+    let b: u32 = build.parse().unwrap_or(0);
+    if b >= 22000 && product_name.contains("Windows 10") {
+        product_name.replacen("Windows 10", "Windows 11", 1)
+    } else {
+        product_name.to_string()
+    }
+}
+
+/// Unix seconds -> "YYYY-MM-DD" (UTC).
+pub fn unix_date(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    // Civil-from-days (Howard Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// WMI datetime "20261005081502.500000+330" -> Unix ms (UTC).
+pub fn wmi_datetime_ms(s: &str) -> Option<i64> {
+    let num = |a: usize, b: usize| s.get(a..b)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, sec) = (num(0, 4)?, num(4, 6)?, num(6, 8)?, num(8, 10)?, num(10, 12)?, num(12, 14)?);
+    // Offset from UTC in minutes, e.g. "+330".
+    let offset = s.get(21..).and_then(|o| o.parse::<i64>().ok()).unwrap_or(0);
+    let (y2, m2) = if mo <= 2 { (y - 1, mo + 9) } else { (y, mo - 3) };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + (153 * m2 + 2) / 5 + d - 1;
+    let days = era * 146_097 + doe - 719_468;
+    Some((((days * 24 + h) * 60 + mi - offset) * 60 + sec) * 1000)
+}
+
+/// Firmware fields left at their factory placeholder.
+pub fn is_placeholder(s: &str) -> bool {
+    let l = s.trim().to_ascii_lowercase();
+    l.is_empty()
+        || l.contains("to be filled")
+        || l.contains("default string")
+        || l.contains("system product name")
+        || l.contains("system manufacturer")
+        || l == "o.e.m."
+        || l == "sku"
+        || l == "rev x.0x"
+        || l == "not applicable"
+        || l == "none"
+}
+
+/// Recognises the common virtual machines from their firmware strings.
+pub fn virtual_machine(manufacturer: &str, model: &str) -> Option<&'static str> {
+    let s = format!("{manufacturer} {model}").to_ascii_lowercase();
+    [
+        ("vmware", "VMware"),
+        ("virtualbox", "VirtualBox"),
+        ("innotek", "VirtualBox"),
+        ("qemu", "QEMU/KVM"),
+        ("kvm", "QEMU/KVM"),
+        ("xen", "Xen"),
+        ("parallels", "Parallels"),
+        ("virtual machine", "Hyper-V"),
+        ("amazon ec2", "Amazon EC2"),
+        ("google compute engine", "Google Cloud"),
+    ]
+    .iter()
+    .find(|(k, _)| s.contains(k))
+    .map(|(_, v)| *v)
+}
+
+/// EDID three-letter PnP vendor codes of common monitor makers.
+pub fn pnp_vendor(code: &str) -> Option<&'static str> {
+    Some(match code.to_ascii_uppercase().as_str() {
+        "ACI" | "AUS" => "ASUS",
+        "ACR" => "Acer",
+        "AOC" => "AOC",
+        "APP" => "Apple",
+        "AUO" => "AU Optronics",
+        "BNQ" => "BenQ",
+        "BOE" => "BOE",
+        "CMN" => "Innolux (Chimei)",
+        "DEL" => "Dell",
+        "GSM" => "LG",
+        "HPN" | "HWP" => "HP",
+        "HSD" => "HannStar",
+        "IVM" => "iiyama",
+        "LEN" => "Lenovo",
+        "LGD" => "LG Display",
+        "MSI" => "MSI",
+        "NEC" => "NEC",
+        "PHL" => "Philips",
+        "SAM" | "SEC" => "Samsung",
+        "SDC" => "Samsung Display",
+        "SHP" => "Sharp",
+        "SNY" => "Sony",
+        "VSC" => "ViewSonic",
+        "GBT" => "Gigabyte",
+        "XMI" => "Xiaomi",
+        _ => return None,
+    })
+}
+
+pub fn network_kind(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    if n.contains("wi-fi") || n.contains("wifi") || n.contains("wireless") || n.contains("802.11") || n.contains("wlan") {
+        "Wi-Fi"
+    } else if n.contains("bluetooth") {
+        "Bluetooth"
+    } else {
+        "Ethernet"
+    }
+}
+
+pub fn battery_chemistry(code: u64) -> &'static str {
+    match code {
+        3 => "Lead acid",
+        4 => "Nickel cadmium",
+        5 => "Nickel metal hydride",
+        6 => "Lithium-ion",
+        7 => "Zinc air",
+        8 => "Lithium polymer",
+        _ => "",
+    }
+}
+
+pub fn battery_status(code: u64) -> &'static str {
+    match code {
+        1 => "On battery",
+        2 => "Plugged in",
+        3 => "Fully charged",
+        4 => "Low",
+        5 => "Critical",
+        6..=9 => "Charging",
         _ => "",
     }
 }
@@ -291,15 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn form_factors() {
-        assert_eq!(guess_form_factor("TUF GAMING X570-PRO WIFI II", 4, 4, false), FormFactor::Atx);
-        assert_eq!(guess_form_factor("TUF GAMING B550M-PLUS", 2, 4, false), FormFactor::MicroAtx);
-        assert_eq!(guess_form_factor("ROG STRIX B550-I GAMING", 1, 2, false), FormFactor::MiniItx);
-        assert_eq!(guess_form_factor("B450 I AORUS PRO WIFI-ITX", 1, 2, false), FormFactor::MiniItx);
-        assert_eq!(guess_form_factor("anything", 4, 4, true), FormFactor::Laptop);
-    }
-
-    #[test]
     fn pld_panels() {
         let mut pld = [0u8; 20];
         assert_eq!(pld_panel(&pld), Panel::Unknown, "zeroed buffer");
@@ -323,6 +424,35 @@ mod tests {
         let id = r"PCI\VEN_10DE&DEV_2484&SUBSYS_40691458&REV_A1\4&1D81E16&0&0019";
         assert_eq!(gpu_vendors(id), ("NVIDIA", "Gigabyte"));
         assert_eq!(gpu_vendors("ROOT\\BasicDisplay"), ("", ""));
+    }
+
+    #[test]
+    fn windows_versions() {
+        assert_eq!(windows_name("Windows 10 Pro", "26100"), "Windows 11 Pro");
+        assert_eq!(windows_name("Windows 10 Pro", "19045"), "Windows 10 Pro");
+        assert_eq!(windows_name("Windows 11 Home", "22631"), "Windows 11 Home");
+    }
+
+    #[test]
+    fn dates() {
+        assert_eq!(unix_date(0), "1970-01-01");
+        assert_eq!(unix_date(1_709_208_000), "2024-02-29");
+        assert_eq!(wmi_datetime_ms("19700101000000.000000+000"), Some(0));
+        // 05:30 local at UTC+5:30 is midnight UTC.
+        assert_eq!(wmi_datetime_ms("19700101053000.000000+330"), Some(0));
+    }
+
+    #[test]
+    fn placeholders_and_vms() {
+        assert!(is_placeholder("To Be Filled By O.E.M."));
+        assert!(is_placeholder("System Product Name"));
+        assert!(!is_placeholder("ROG STRIX B550-F GAMING"));
+        assert_eq!(virtual_machine("VMware, Inc.", "VMware7,1"), Some("VMware"));
+        assert_eq!(virtual_machine("Microsoft Corporation", "Virtual Machine"), Some("Hyper-V"));
+        assert_eq!(virtual_machine("ASUS", "System Product Name"), None);
+        assert_eq!(pnp_vendor("GSM"), Some("LG"));
+        assert_eq!(network_kind("Intel(R) Wi-Fi 6 AX200 160MHz"), "Wi-Fi");
+        assert_eq!(network_kind("Realtek Gaming 2.5GbE Family Controller"), "Ethernet");
     }
 
     #[test]

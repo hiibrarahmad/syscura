@@ -33,6 +33,9 @@ pub struct Rule {
     pub explain: String,
     #[serde(default)]
     pub advice: String,
+    /// Web search for this problem (template, like `explain`).
+    #[serde(default)]
+    pub search: String,
     #[serde(rename = "match")]
     pub matcher: Matcher,
     #[serde(default)]

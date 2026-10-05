@@ -13,7 +13,10 @@ use syscura_store::Store;
 use crate::{actions, log};
 
 pub enum Job {
+    /// Fix number `fix` from the finding's rule.
     Fix { finding: i64, fix: usize, automatic: bool },
+    /// Any action from the catalog (chosen by the user or the AI).
+    Action { finding: i64, action: String, params: BTreeMap<String, String>, label: String, automatic: bool },
     Undo { attempt: i64 },
 }
 
@@ -22,6 +25,16 @@ struct Pending {
     attempt: i64,
     finding: i64,
     due_ms: i64,
+}
+
+/// Everything needed to run and check one fix.
+struct Plan {
+    action: String,
+    params: BTreeMap<String, String>,
+    label: String,
+    probes: Vec<(String, BTreeMap<String, String>)>,
+    quiet_mins: Option<i64>,
+    fix_index: usize,
 }
 
 pub fn start(db_path: PathBuf, rx: Receiver<Job>) -> Result<(), String> {
@@ -46,7 +59,15 @@ fn run(db_path: PathBuf, rx: Receiver<Job>) {
     loop {
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(Job::Fix { finding, fix, automatic }) => {
-                if let Some(p) = apply(&store, &engine, finding, fix, automatic) {
+                if let Some(plan) = rule_plan(&store, &engine, finding, fix)
+                    && let Some(p) = apply(&store, finding, plan, automatic)
+                {
+                    pending.push(p);
+                }
+            }
+            Ok(Job::Action { finding, action, params, label, automatic }) => {
+                let plan = action_plan(&store, &engine, finding, action, params, label);
+                if let Some(p) = apply(&store, finding, plan, automatic) {
                     pending.push(p);
                 }
             }
@@ -70,41 +91,96 @@ fn run(db_path: PathBuf, rx: Receiver<Job>) {
     }
 }
 
-fn apply(store: &Store, engine: &Engine, finding_id: i64, fix: usize, automatic: bool) -> Option<Pending> {
+fn rule_plan(store: &Store, engine: &Engine, finding_id: i64, fix: usize) -> Option<Plan> {
     let finding = store.finding(finding_id).ok()??;
     let rule = engine.rule(&finding.rule_id)?;
     let spec = rule.fixes.get(fix)?;
     let fill = |m: &BTreeMap<String, String>| -> BTreeMap<String, String> {
         m.iter().map(|(k, v)| (k.clone(), render(v, &finding.evidence, finding.count))).collect()
     };
-    let before = finding.status;
+    let mut plan = Plan {
+        action: spec.action.clone(),
+        params: fill(&spec.params),
+        label: spec.label.clone(),
+        probes: Vec::new(),
+        quiet_mins: None,
+        fix_index: fix,
+    };
+    for v in &rule.verify {
+        if v.probe == "quiet" {
+            plan.quiet_mins = v.params.get("mins").and_then(|m| m.parse().ok());
+        } else {
+            plan.probes.push((v.probe.clone(), fill(&v.params)));
+        }
+    }
+    Some(plan)
+}
+
+/// A catalog action: checked right away when there is something to check,
+/// and watched for the rule's quiet period when the finding has a rule.
+fn action_plan(
+    store: &Store,
+    engine: &Engine,
+    finding_id: i64,
+    action: String,
+    params: BTreeMap<String, String>,
+    label: String,
+) -> Plan {
+    let mut probes = Vec::new();
+    if matches!(action.as_str(), "service.ensure_running" | "service.restart") {
+        probes.push(("service_running".to_string(), params.clone()));
+    }
+    let quiet_mins = store
+        .finding(finding_id)
+        .ok()
+        .flatten()
+        .and_then(|f| engine.rule(&f.rule_id).cloned())
+        .and_then(|r| r.verify.iter().find(|v| v.probe == "quiet").and_then(|v| v.params.get("mins")?.parse().ok()));
+    // Index usize::MAX marks "not one of the rule's own fixes".
+    Plan { action, params, label, probes, quiet_mins, fix_index: usize::MAX }
+}
+
+fn apply(store: &Store, finding_id: i64, plan: Plan, automatic: bool) -> Option<Pending> {
+    let before = store.finding(finding_id).ok()??.status;
+    // The agent, not the caller, decides what may run unattended.
+    if automatic && actions::risk(&plan.action) != Some(Risk::Safe) {
+        log::error(&format!("refused automatic {}: not a safe action", plan.action));
+        return None;
+    }
     let _ = store.set_finding_status(finding_id, FindingStatus::Fixing);
-    log::info(&format!("fix {} for finding {finding_id}: {}", spec.action, spec.label));
+    log::info(&format!("fix {} for finding {finding_id}: {}", plan.action, plan.label));
 
     let mut attempt = FixAttempt {
         id: 0,
         ts: now_ms(),
-        fix_index: fix,
-        label: spec.label.clone(),
+        fix_index: plan.fix_index,
+        label: plan.label.clone(),
         automatic,
         ok: false,
         verified: None,
         message: String::new(),
         undo: None,
         undone: false,
+        outcome: String::new(),
     };
-    let mut quiet_mins: Option<i64> = None;
-    match actions::run(&spec.action, &fill(&spec.params)) {
+    // Changes that are not "safe" get a restore point first (best effort:
+    // Windows allows one per day and needs System Protection turned on).
+    let mut note = String::new();
+    if matches!(actions::risk(&plan.action), Some(Risk::Caution | Risk::Risky)) && plan.action != "restore_point" {
+        note = match actions::run("restore_point", &BTreeMap::new()) {
+            Ok(_) => " A restore point was created first.".into(),
+            Err(_) => " (No new restore point: Windows allows one per day, or System Protection is off.)".into(),
+        };
+    }
+    let mut effect = actions::Effect::Fixed;
+    match actions::run(&plan.action, &plan.params) {
         Ok(outcome) => {
             attempt.ok = true;
             attempt.message = outcome.message;
             attempt.undo = outcome.undo;
-            for v in &rule.verify {
-                if v.probe == "quiet" {
-                    quiet_mins = v.params.get("mins").and_then(|m| m.parse().ok());
-                    continue;
-                }
-                match actions::probe(&v.probe, &fill(&v.params)) {
+            effect = outcome.effect;
+            for (probe, params) in &plan.probes {
+                match actions::probe(probe, params) {
                     Ok(true) => {}
                     Ok(false) => {
                         attempt.verified = Some(false);
@@ -116,7 +192,7 @@ fn apply(store: &Store, engine: &Engine, finding_id: i64, fix: usize, automatic:
                     }
                 }
             }
-            if attempt.verified.is_none() && quiet_mins.is_none() {
+            if attempt.verified.is_none() && plan.quiet_mins.is_none() {
                 attempt.verified = Some(true);
             }
         }
@@ -125,11 +201,20 @@ fn apply(store: &Store, engine: &Engine, finding_id: i64, fix: usize, automatic:
             attempt.message = explain_error(&e);
         }
     }
+    attempt.message.push_str(&note);
+    attempt.outcome = if !attempt.ok { "failed".into() } else { effect.as_str().into() };
+    // "Nothing found" is not a fix: the problem is still there.
+    if attempt.ok && effect == actions::Effect::NothingFound {
+        attempt.verified = None;
+    }
 
     let attempt_id = store.add_attempt(finding_id, &attempt).ok()?;
-    // A restore point prepares for a fix; it does not fix anything itself.
-    let status = if spec.action == "restore_point" {
+    // A restore point prepares for a fix; it does not fix anything itself,
+    // and neither does a check that found nothing wrong.
+    let status = if plan.action == "restore_point" || (attempt.ok && effect == actions::Effect::NothingFound) {
         if before == FindingStatus::Fixing { FindingStatus::Open } else { before }
+    } else if attempt.ok && effect == actions::Effect::NotRepaired {
+        FindingStatus::FixFailed
     } else if attempt.ok && attempt.verified != Some(false) {
         FindingStatus::Fixed
     } else {
@@ -138,7 +223,7 @@ fn apply(store: &Store, engine: &Engine, finding_id: i64, fix: usize, automatic:
     let _ = store.set_finding_status(finding_id, status);
     log::info(&format!("fix result for finding {finding_id}: {} ({})", status.as_str(), attempt.message));
 
-    match (status, quiet_mins) {
+    match (status, plan.quiet_mins) {
         (FindingStatus::Fixed, Some(mins)) => Some(Pending { attempt: attempt_id, finding: finding_id, due_ms: now_ms() + mins * 60_000 }),
         _ => None,
     }

@@ -1,312 +1,175 @@
-//! Free online helpers. Today: finding a product picture for each part.
-//!
-//! Sources, in order (all free, no API keys):
-//! 0. A known exact picture (board profiles carry the maker's own photo).
-//! 1. Bing Images, preferring pictures hosted on the brand's own website.
-//! 2. Web search (Brave, then DuckDuckGo) -> the product page -> its
-//!    `og:image` preview picture (what link previews in chat apps show).
-//! 3. Wikipedia's page-image API: a *generic* example picture only, marked
-//!    as such (source "wikipedia").
-//!
-//! Searches are spaced out (`MIN_SEARCH_GAP`) because search engines block
-//! rapid automated queries. Results are cached forever by the caller, so
-//! each part is looked up once per PC.
+//! Free online help: an optional AI assistant (Google Gemini's free tier,
+//! with the user's own key) that searches the web for a problem, explains
+//! it, and picks fixes from Syscura's fixed action catalog.
 
-pub mod cache;
-pub mod html;
-pub mod query;
+pub mod prompt;
+#[cfg(windows)]
+pub mod secrets;
 
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use ureq::ResponseExt;
+use serde_json::{Value, json};
+use syscura_core::findings::ActionInfo;
 
-/// Browser-like (search pages reject unknown clients) and tagged "Syscura".
-/// No personal data is ever sent.
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36 Syscura/0.1";
-const MIN_SEARCH_GAP: Duration = Duration::from_secs(20);
-const MAX_PAGE: u64 = 3 * 1024 * 1024;
-const MAX_IMAGE: u64 = 8 * 1024 * 1024;
+pub use prompt::{Analysis, ProposedAction, Question, Secrets, Source};
 
-/// Sites that never have a useful product picture for us.
-const SKIP_DOMAINS: &[&str] = &[
-    "youtube.", "reddit.", "facebook.", "twitter.", "x.com", "pinterest.", "tiktok.", "wikipedia.org",
-    "quora.", "techpowerup.com/forums", "linustechtips.com", "tomshardware.com/forum", "duckduckgo.",
-];
+const API: &str = "https://generativelanguage.googleapis.com/v1beta";
+const MAX_REPLY: u64 = 2 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
-pub struct FoundImage {
-    pub bytes: Vec<u8>,
-    /// "image/png", "image/jpeg", ...
-    pub mime: String,
-    pub image_url: String,
-    /// The page the picture came from (shown as attribution).
-    pub page_url: String,
-    /// "web" or "wikipedia".
-    pub source: String,
-}
-
-#[derive(Debug)]
-pub enum FindError {
-    /// The search engine is rate-limiting us; try again later.
-    Throttled,
-    NotFound,
-    Network(String),
-}
-
-impl std::fmt::Display for FindError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FindError::Throttled => write!(f, "search engine asked us to slow down"),
-            FindError::NotFound => write!(f, "no picture found"),
-            FindError::Network(e) => write!(f, "network error: {e}"),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Engine {
-    Brave,
-    DuckDuckGo,
-    BingImages,
-}
-
-pub struct ImageFinder {
+pub struct Gemini {
     agent: ureq::Agent,
-    /// Last query time per engine (Brave, DuckDuckGo, Bing Images).
-    last_search: Mutex<[Option<Instant>; 3]>,
+    key: String,
 }
 
-impl Default for ImageFinder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ImageFinder {
-    pub fn new() -> Self {
+impl Gemini {
+    pub fn new(key: &str) -> Self {
         let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(20)))
+            .timeout_global(Some(Duration::from_secs(90)))
             .http_status_as_error(false)
-            .max_redirects(5)
             .build()
             .into();
-        ImageFinder { agent, last_search: Mutex::new([None, None, None]) }
+        Gemini { agent, key: key.trim().to_string() }
     }
 
-    /// Finds a picture for one part. Blocks (it waits between searches).
-    pub fn find(&self, part: &query::PartQuery) -> Result<FoundImage, FindError> {
-        if let Some(url) = &part.direct_url
-            && let Some((bytes, mime)) = self.download_image(url)
-        {
-            let page_url = part.direct_page.clone().unwrap_or_else(|| url.clone());
-            return Ok(FoundImage { bytes, mime, image_url: url.clone(), page_url, source: "maker".into() });
-        }
-        let mut throttled = 0;
-        match self.find_on_bing_images(&part.query, part.brand.as_deref()) {
-            Ok(img) => return Ok(img),
-            Err(FindError::Throttled) => throttled += 1,
-            Err(_) => {}
-        }
-        for engine in [Engine::Brave, Engine::DuckDuckGo] {
-            match self.find_on_web(engine, &part.query) {
-                Ok(img) => return Ok(img),
-                Err(FindError::Throttled) => throttled += 1,
-                Err(_) => {}
-            }
-        }
-        if let Some(hint) = &part.wiki_hint
-            && let Ok(img) = self.find_on_wikipedia(hint)
-        {
-            return Ok(img);
-        }
-        Err(if throttled == 3 { FindError::Throttled } else { FindError::NotFound })
-    }
-
-    fn find_on_bing_images(&self, query: &str, brand: Option<&str>) -> Result<FoundImage, FindError> {
-        self.wait_turn(Engine::BingImages);
+    fn get_json(&self, url: &str) -> Result<Value, String> {
         let mut resp = self
             .agent
-            .get("https://www.bing.com/images/async")
-            .query("q", query)
-            .query("first", "0")
-            .query("count", "20")
-            .query("mmasync", "1")
-            .header("User-Agent", USER_AGENT)
-            .header("Accept-Language", "en-US,en;q=0.9")
+            .get(url)
+            .header("x-goog-api-key", &self.key)
             .call()
-            .map_err(|e| FindError::Network(e.to_string()))?;
-        if resp.status().as_u16() != 200 {
-            return Err(FindError::Throttled);
+            .map_err(|e| format!("Could not reach Google: {e}"))?;
+        let status = resp.status().as_u16();
+        let body = resp.body_mut().with_config().limit(MAX_REPLY).read_to_string().map_err(|e| e.to_string())?;
+        check(status, &body)
+    }
+
+    /// Names of the models this key can use ("models/gemini-2.5-flash", ...).
+    pub fn models(&self) -> Result<Vec<String>, String> {
+        let v = self.get_json(&format!("{API}/models?pageSize=200"))?;
+        Ok(v["models"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|m| {
+                        m["supportedGenerationMethods"]
+                            .as_array()
+                            .is_some_and(|s| s.iter().any(|x| x == "generateContent"))
+                    })
+                    .filter_map(|m| m["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Checks the key and returns the model Syscura will use.
+    pub fn verify(&self) -> Result<String, String> {
+        prompt::pick_model(&self.models()?).ok_or_else(|| "This key has no Gemini Flash model available.".to_string())
+    }
+
+    /// Asks with `preferred` first; when Google says a model's free limit is
+    /// reached, tries the other free models, and finally answers without
+    /// web search (which has its own, smaller limit).
+    pub fn analyze_with_fallback(&self, preferred: Option<&str>, q: &Question, catalog: &[ActionInfo]) -> Result<Analysis, String> {
+        let mut models = prompt::model_candidates(&self.models()?);
+        if let Some(p) = preferred
+            && let Some(i) = models.iter().position(|m| m == p)
+        {
+            let m = models.remove(i);
+            models.insert(0, m);
         }
-        let page = resp
-            .body_mut()
-            .with_config()
-            .limit(MAX_PAGE)
-            .read_to_string()
-            .map_err(|e| FindError::Network(e.to_string()))?;
-        let mut results = html::bing_image_results(&page);
-        if results.is_empty() {
-            return Err(FindError::NotFound);
+        if models.is_empty() {
+            return Err("This key has no free Gemini Flash model available.".into());
         }
-        // The brand's own website first: that is the exact product photo.
-        if let Some(b) = brand.map(brand_domain_key).filter(|b| !b.is_empty()) {
-            results.sort_by_key(|(img, pg)| !(host_of(img).contains(&b) || host_of(pg).contains(&b)));
-        }
-        for (img, page_url) in results.into_iter().take(5) {
-            if let Some((bytes, mime)) = self.download_image(&img) {
-                return Ok(FoundImage { bytes, mime, image_url: img, page_url, source: "web".into() });
+        let mut last = String::new();
+        for search in [true, false] {
+            for m in models.iter().take(5) {
+                match self.ask(m, q, catalog, search) {
+                    Ok(a) => return Ok(a),
+                    Err(e) if e.contains("free AI limit") || e.contains("(404)") || e.contains("(503)") => last = e,
+                    Err(e) => return Err(e),
+                }
             }
         }
-        Err(FindError::NotFound)
+        Err(if last.is_empty() { "The AI did not answer.".into() } else { last })
     }
 
-    fn wait_turn(&self, engine: Engine) {
-        let mut last = self.last_search.lock().unwrap_or_else(|e| e.into_inner());
-        let slot = &mut last[engine as usize];
-        if let Some(t) = *slot {
-            let since = t.elapsed();
-            if since < MIN_SEARCH_GAP {
-                std::thread::sleep(MIN_SEARCH_GAP - since);
-            }
-        }
-        *slot = Some(Instant::now());
+    /// Asks the AI about a problem. Uses Google Search grounding, so the
+    /// answer is based on current web results, with sources.
+    pub fn analyze(&self, model: &str, q: &Question, catalog: &[ActionInfo]) -> Result<Analysis, String> {
+        self.ask(model, q, catalog, true)
     }
 
-    fn find_on_web(&self, engine: Engine, query: &str) -> Result<FoundImage, FindError> {
-        self.wait_turn(engine);
-        let request = match engine {
-            Engine::Brave => self.agent.get("https://search.brave.com/search").query("q", query),
-            Engine::DuckDuckGo | Engine::BingImages => self.agent.get("https://html.duckduckgo.com/html/").query("q", query),
-        };
-        let mut resp = request
-            .header("User-Agent", USER_AGENT)
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .call()
-            .map_err(|e| FindError::Network(e.to_string()))?;
-        // Engines answer 202/429/403 with a challenge page when rate-limiting.
-        if resp.status().as_u16() != 200 {
-            return Err(FindError::Throttled);
-        }
-        let page = resp
-            .body_mut()
-            .with_config()
-            .limit(MAX_PAGE)
-            .read_to_string()
-            .map_err(|e| FindError::Network(e.to_string()))?;
-        let links = match engine {
-            Engine::Brave => html::plain_result_links(&page, "brave.com"),
-            Engine::DuckDuckGo | Engine::BingImages => html::ddg_result_links(&page),
-        };
-        let links: Vec<String> = links
-            .into_iter()
-            .filter(|u| !SKIP_DOMAINS.iter().any(|d| u.contains(d)))
-            .take(4)
-            .collect();
-        if links.is_empty() {
-            return Err(FindError::NotFound);
-        }
-        for link in links {
-            if let Some(img) = self.image_from_page(&link) {
-                return Ok(img);
-            }
-        }
-        Err(FindError::NotFound)
-    }
+    fn ask(&self, model: &str, q: &Question, catalog: &[ActionInfo], search: bool) -> Result<Analysis, String> {
+        let secrets = Secrets::from_env();
+        let mut q = q.clone();
+        q.title = prompt::redact(&q.title, &secrets);
+        q.explanation = prompt::redact(&q.explanation, &secrets);
+        q.details = q.details.iter().map(|(k, v)| (k.clone(), prompt::redact(v, &secrets))).collect();
+        q.system = prompt::redact(&q.system, &secrets);
 
-    fn image_from_page(&self, page_url: &str) -> Option<FoundImage> {
-        let mut resp = self.agent.get(page_url).header("User-Agent", USER_AGENT).call().ok()?;
-        if !resp.status().is_success() {
-            return None;
+        let mut body = json!({
+            "systemInstruction": { "parts": [{ "text": prompt::system_instruction() }] },
+            "contents": [{ "role": "user", "parts": [{ "text": prompt::build_prompt(&q, catalog) }] }],
+            "generationConfig": { "temperature": 0.2 }
+        });
+        if search {
+            body["tools"] = json!([{ "google_search": {} }]);
         }
-        let final_url = resp.get_uri().to_string();
-        let body = resp.body_mut().with_config().limit(MAX_PAGE).read_to_string().ok()?;
-        let image_url = html::preview_image(&body, &final_url)?;
-        let (bytes, mime) = self.download_image(&image_url)?;
-        Some(FoundImage { bytes, mime, image_url, page_url: final_url, source: "web".into() })
-    }
-
-    fn find_on_wikipedia(&self, title: &str) -> Result<FoundImage, FindError> {
+        let url = format!("{API}/models/{model}:generateContent");
         let mut resp = self
             .agent
-            .get("https://en.wikipedia.org/w/api.php")
-            .query("action", "query")
-            .query("format", "json")
-            .query("prop", "pageimages")
-            .query("piprop", "original")
-            .query("redirects", "1")
-            .query("titles", title)
-            .header("User-Agent", "Syscura/0.1 (hardware health app)")
-            .call()
-            .map_err(|e| FindError::Network(e.to_string()))?;
-        let text = resp
-            .body_mut()
-            .with_config()
-            .limit(MAX_PAGE)
-            .read_to_string()
-            .map_err(|e| FindError::Network(e.to_string()))?;
-        let json: serde_json::Value = serde_json::from_str(&text).map_err(|_| FindError::NotFound)?;
-        let pages = json["query"]["pages"].as_object().ok_or(FindError::NotFound)?;
-        let (page, image_url) = pages
-            .values()
-            .find_map(|p| Some((p["title"].as_str()?.to_string(), p["original"]["source"].as_str()?.to_string())))
-            .ok_or(FindError::NotFound)?;
-        let (bytes, mime) = self.download_image(&image_url).ok_or(FindError::NotFound)?;
-        Ok(FoundImage {
-            bytes,
-            mime,
-            image_url,
-            page_url: format!("https://en.wikipedia.org/wiki/{}", page.replace(' ', "_")),
-            source: "wikipedia".into(),
-        })
-    }
+            .post(&url)
+            .header("x-goog-api-key", &self.key)
+            .header("Content-Type", "application/json")
+            .send(body.to_string())
+            .map_err(|e| format!("Could not reach Google: {e}"))?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().with_config().limit(MAX_REPLY).read_to_string().map_err(|e| e.to_string())?;
+        let v = check(status, &text)?;
 
-    /// Downloads and checks that the bytes really are an image (the server's
-    /// content type is not trusted).
-    pub fn download_image(&self, url: &str) -> Option<(Vec<u8>, String)> {
-        if !url.starts_with("https://") && !url.starts_with("http://") {
-            return None;
+        let cand = &v["candidates"][0];
+        let reply: String = cand["content"]["parts"]
+            .as_array()
+            .map(|parts| parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(""))
+            .unwrap_or_default();
+        if reply.is_empty() {
+            let reason = cand["finishReason"].as_str().unwrap_or("no answer");
+            return Err(format!("The AI returned no answer ({reason})."));
         }
-        let mut resp = self.agent.get(url).header("User-Agent", USER_AGENT).call().ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        let bytes = resp.body_mut().with_config().limit(MAX_IMAGE).read_to_vec().ok()?;
-        let mime = sniff_image(&bytes)?;
-        Some((bytes, mime.to_string()))
+        let mut a = prompt::parse_reply(&reply, catalog)?;
+        a.model = model.to_string();
+        a.sources = cand["groundingMetadata"]["groundingChunks"]
+            .as_array()
+            .map(|chunks| {
+                chunks
+                    .iter()
+                    .filter_map(|c| {
+                        Some(Source {
+                            title: c["web"]["title"].as_str()?.to_string(),
+                            url: c["web"]["uri"].as_str()?.to_string(),
+                        })
+                    })
+                    .take(6)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(a)
     }
 }
 
-fn host_of(url: &str) -> String {
-    url.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("").to_ascii_lowercase()
-}
-
-/// "G.Skill" -> "gskill", "Western Digital" -> "westerndigital".
-fn brand_domain_key(brand: &str) -> String {
-    let b: String = brand.to_ascii_lowercase().chars().filter(char::is_ascii_alphanumeric).collect();
-    match b.as_str() {
-        "wd" | "wdc" => "westerndigital".into(),
-        _ => b,
+/// Turns API errors into messages a person can act on.
+fn check(status: u16, body: &str) -> Result<Value, String> {
+    let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    if status == 200 {
+        return Ok(v);
     }
-}
-
-/// Image type from magic bytes. Only raster formats; SVG is refused because
-/// it can carry scripts.
-pub fn sniff_image(b: &[u8]) -> Option<&'static str> {
-    if b.starts_with(&[0x89, b'P', b'N', b'G']) {
-        Some("image/png")
-    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("image/jpeg")
-    } else if b.len() > 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if b.starts_with(b"GIF8") {
-        Some("image/gif")
-    } else if b.len() > 12 && &b[4..8] == b"ftyp" && (&b[8..12] == b"avif" || &b[8..12] == b"avis") {
-        Some("image/avif")
-    } else {
-        None
-    }
+    let msg = v["error"]["message"].as_str().unwrap_or("").to_string();
+    Err(match status {
+        400 if msg.to_ascii_lowercase().contains("api key") => "That API key is not valid. Copy it again from Google AI Studio.".into(),
+        401 | 403 => "Google refused the key. Check it in Google AI Studio.".into(),
+        429 => "The free AI limit is reached for now. Syscura will try again later.".into(),
+        _ => format!("Google answered with an error ({status}). {msg}"),
+    })
 }
 
 #[cfg(test)]
@@ -314,17 +177,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn brand_keys() {
-        assert_eq!(brand_domain_key("G.Skill"), "gskill");
-        assert_eq!(host_of("https://www.GSkill.com/x.png"), "www.gskill.com");
-    }
-
-    #[test]
-    fn sniffing() {
-        assert_eq!(sniff_image(&[0x89, b'P', b'N', b'G', 0, 0]), Some("image/png"));
-        assert_eq!(sniff_image(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
-        assert_eq!(sniff_image(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
-        assert_eq!(sniff_image(b"<svg xmlns=..."), None);
-        assert_eq!(sniff_image(b"<html>"), None);
+    fn api_errors_are_readable() {
+        assert!(check(429, "{}").unwrap_err().contains("free AI limit"));
+        assert!(check(400, r#"{"error":{"message":"API key not valid. Please pass a valid API key."}}"#).unwrap_err().contains("not valid"));
+        assert!(check(200, r#"{"ok":true}"#).is_ok());
     }
 }

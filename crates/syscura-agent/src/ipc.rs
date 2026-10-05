@@ -218,6 +218,10 @@ fn answer(req: Request, store: &Store, engine: &Engine, shared: &Shared) -> Resp
         Request::Ignore { finding, ignore } => store
             .set_finding_status(finding, if ignore { FindingStatus::Ignored } else { FindingStatus::Open })
             .map(|_| Response::Done(if ignore { "Ignored." } else { "No longer ignored." }.into())),
+        Request::Actions => return Response::Actions(actions::catalog()),
+        Request::ApplyAction { finding, title, action, params, label, automatic } => {
+            return apply_action(store, shared, finding, &title, action, params, label, automatic);
+        }
         Request::Shutdown => unreachable!("handled before"),
     };
     result.unwrap_or_else(|e| Response::Error(format!("store error: {e}")))
@@ -229,6 +233,55 @@ fn send(shared: &Shared, job: Job, ok: &str) -> Response {
         Err(_) => Response::Error("The fixer is not running.".into()),
     }
 }
+
+#[allow(clippy::too_many_arguments)]
+fn apply_action(
+    store: &Store,
+    shared: &Shared,
+    finding: Option<i64>,
+    title: &str,
+    action: String,
+    params: std::collections::BTreeMap<String, String>,
+    label: String,
+    automatic: bool,
+) -> Response {
+    if let Err(e) = actions::validate(&action, &params) {
+        return Response::Error(e);
+    }
+    // Only safe actions may run without a person approving them.
+    if automatic && actions::risk(&action) != Some(syscura_core::findings::Risk::Safe) {
+        return Response::Error("This fix changes your PC, so it needs your approval.".into());
+    }
+    let finding = match finding {
+        Some(id) => match store.finding(id) {
+            Ok(Some(f)) if f.status == FindingStatus::Fixing => {
+                return Response::Error("A fix for this problem is already running.".into());
+            }
+            Ok(Some(_)) => id,
+            Ok(None) => return Response::Error("No such problem.".into()),
+            Err(e) => return Response::Error(format!("store error: {e}")),
+        },
+        // A fix for something seen on the Events page: record it as a problem.
+        None => {
+            let title: String = title.chars().take(120).collect();
+            let evidence = std::collections::BTreeMap::from([("title".to_string(), title.clone())]);
+            match store.record_hit(AI_RULE, &title, now_ms(), &evidence) {
+                Ok(r) => match r {
+                    syscura_store::Recorded::New(id)
+                    | syscura_store::Recorded::Repeat(id)
+                    | syscura_store::Recorded::Returned(id)
+                    | syscura_store::Recorded::Ignored(id) => id,
+                },
+                Err(e) => return Response::Error(format!("store error: {e}")),
+            }
+        }
+    };
+    let label = if label.trim().is_empty() { action.clone() } else { label.chars().take(160).collect() };
+    send(shared, Job::Action { finding, action, params, label: label.clone(), automatic }, &format!("Started: {label}"))
+}
+
+/// Rule id for problems created from AI help on the Events page.
+const AI_RULE: &str = "ai";
 
 fn start_fix(store: &Store, engine: &Engine, shared: &Shared, finding: i64, fix: usize) -> Response {
     let row = match store.finding(finding) {
@@ -248,7 +301,34 @@ fn start_fix(store: &Store, engine: &Engine, shared: &Shared, finding: i64, fix:
 
 /// A stored finding plus the rule's words and fixes.
 fn finding_view(engine: &Engine, store: &Store, r: syscura_store::FindingRow) -> Option<Finding> {
+    if r.rule_id == AI_RULE {
+        return Some(Finding {
+            id: r.id,
+            rule_id: r.rule_id.clone(),
+            group: String::new(),
+            title: r.group.clone(),
+            category: "software".into(),
+            severity: Level::Warning,
+            harmful: Harm::Maybe,
+            explanation: "A fix you started from the Events page with AI help.".into(),
+            advice: String::new(),
+            message: String::new(),
+            first_ts: r.first_ts,
+            last_ts: r.last_ts,
+            count: r.count,
+            status: r.status,
+            fixes: Vec::new(),
+            attempts: store.attempts(r.id).unwrap_or_default(),
+            evidence: Default::default(),
+            search: format!("Windows {}", r.group),
+        });
+    }
     let rule = engine.rule(&r.rule_id)?;
+    let mut r = r;
+    // Problems saved before a rule gained a cheap, offline check get it now.
+    if rule.enrich.as_deref() == Some("bugcheck") && !r.evidence.contains_key("StopName") {
+        crate::trust::enrich("bugcheck", &mut r.evidence);
+    }
     // Checks run on the evidence may raise or lower the rule's defaults.
     let harmful = match r.evidence.get("_harmful").map(String::as_str) {
         Some("yes") => Harm::Yes,
@@ -271,6 +351,7 @@ fn finding_view(engine: &Engine, store: &Store, r: syscura_store::FindingRow) ->
         harmful,
         explanation: render(&rule.explain, &r.evidence, r.count),
         advice: rule.advice.clone(),
+        message: r.evidence.get("_message").cloned().unwrap_or_default(),
         first_ts: r.first_ts,
         last_ts: r.last_ts,
         count: r.count,
@@ -289,6 +370,11 @@ fn finding_view(engine: &Engine, store: &Store, r: syscura_store::FindingRow) ->
             })
             .collect(),
         attempts: store.attempts(r.id).unwrap_or_default(),
+        search: if rule.search.is_empty() {
+            format!("Windows {} event {}", r.evidence.get("provider").map(String::as_str).unwrap_or(""), r.evidence.get("event_id").map(String::as_str).unwrap_or(""))
+        } else {
+            render(&rule.search, &r.evidence, r.count).replace(" ?", "")
+        },
         evidence: r.evidence.into_iter().filter(|(k, _)| !k.starts_with('_')).collect(),
     })
 }

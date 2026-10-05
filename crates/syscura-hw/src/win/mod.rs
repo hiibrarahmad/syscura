@@ -2,6 +2,7 @@
 
 mod lhm;
 mod nvml;
+mod system;
 mod usb;
 
 use serde::{Deserialize, Deserializer};
@@ -41,40 +42,20 @@ impl<'de> Deserialize<'de> for Num {
 }
 
 impl Num {
-    fn u32(self) -> u32 {
+    pub(crate) fn u32(self) -> u32 {
         self.0.unwrap_or(0).min(u32::MAX as u64) as u32
     }
-    fn u64(self) -> u64 {
+    pub(crate) fn u64(self) -> u64 {
         self.0.unwrap_or(0)
     }
 }
 
-fn text(s: Option<String>) -> String {
+pub(crate) fn text(s: Option<String>) -> String {
     s.map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
-fn query<T: for<'de> Deserialize<'de>>(con: &WMIConnection, wql: &str) -> Vec<T> {
+pub(crate) fn query<T: for<'de> Deserialize<'de>>(con: &WMIConnection, wql: &str) -> Vec<T> {
     con.raw_query(wql).unwrap_or_default()
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct ComputerSystem {
-    manufacturer: Option<String>,
-    model: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Enclosure {
-    chassis_types: Option<Vec<Num>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Os {
-    caption: Option<String>,
-    build_number: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -146,15 +127,6 @@ struct PhysicalMemory {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct MemoryArray {
-    #[serde(default)]
-    memory_devices: Num,
-    #[serde(default, rename = "Use")]
-    usage: Num,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
 struct SystemSlot {
     slot_designation: Option<String>,
     #[serde(default)]
@@ -219,21 +191,7 @@ pub fn collect() -> HardwareInfo {
         }
     };
 
-    let cs: Vec<ComputerSystem> = query(&con, "SELECT Manufacturer, Model FROM Win32_ComputerSystem");
-    let chassis = query::<Enclosure>(&con, "SELECT ChassisTypes FROM Win32_SystemEnclosure")
-        .into_iter()
-        .flat_map(|e| e.chassis_types.unwrap_or_default())
-        .find_map(|n| n.0)
-        .unwrap_or(0);
-    let os: Vec<Os> = query(&con, "SELECT Caption, BuildNumber FROM Win32_OperatingSystem");
-    if let Some(c) = cs.into_iter().next() {
-        hw.system.manufacturer = text(c.manufacturer);
-        hw.system.model = text(c.model);
-    }
-    hw.system.chassis = parse::chassis_name(chassis).into();
-    if let Some(o) = os.into_iter().next() {
-        hw.system.os = format!("{} (build {})", text(o.caption), text(o.build_number));
-    }
+    system::system_and_os(&con, &mut hw);
 
     if let Some(b) = query::<BaseBoard>(&con, "SELECT Manufacturer, Product, Version FROM Win32_BaseBoard")
         .into_iter()
@@ -241,7 +199,7 @@ pub fn collect() -> HardwareInfo {
     {
         hw.board.manufacturer = text(b.manufacturer);
         hw.board.product = text(b.product);
-        hw.board.version = text(b.version);
+        hw.board.version = text(b.version).trim_start_matches("Rev X.0x").to_string();
     }
     if let Some(b) = query::<Bios>(&con, "SELECT Manufacturer, SMBIOSBIOSVersion, ReleaseDate FROM Win32_BIOS")
         .into_iter()
@@ -265,7 +223,7 @@ pub fn collect() -> HardwareInfo {
         socket: text(p.socket_designation),
         cores: p.number_of_cores.u32(),
         threads: p.number_of_logical_processors.u32(),
-        max_mhz: p.max_clock_speed.u32(),
+        base_mhz: p.max_clock_speed.u32(),
         l2_kb: p.l2_cache_size.u32(),
         l3_kb: p.l3_cache_size.u32(),
         family: text(p.caption),
@@ -275,12 +233,7 @@ pub fn collect() -> HardwareInfo {
     })
     .collect();
 
-    // Use = 3 is system memory (not flash or video memory arrays).
-    hw.memory.total_slots = query::<MemoryArray>(&con, "SELECT MemoryDevices, Use FROM Win32_PhysicalMemoryArray")
-        .into_iter()
-        .filter(|a| a.usage.0 == Some(3))
-        .map(|a| a.memory_devices.u32())
-        .sum();
+    system::memory_totals(&con, &mut hw);
     hw.memory.sticks = query::<PhysicalMemory>(
         &con,
         "SELECT DeviceLocator, BankLabel, Capacity, Speed, ConfiguredClockSpeed, Manufacturer, \
@@ -349,16 +302,14 @@ pub fn collect() -> HardwareInfo {
     })
     .collect();
 
-    hw.board.form_factor = parse::guess_form_factor(
-        &hw.board.product,
-        hw.slots.iter().filter(|s| s.name.to_ascii_uppercase().contains("PCIE")).count(),
-        hw.memory.total_slots,
-        parse::is_laptop_chassis(chassis),
-    );
-
     nvml::gpu_details(&mut hw.gpus);
     collect_disks(&mut hw, &con);
-    hw.usb = usb::devices(&con, hw.system.chassis == "desktop");
+    hw.usb = usb::devices(&con);
+    hw.displays = system::displays();
+    hw.volumes = system::volumes(&con);
+    hw.network = system::network(&con);
+    hw.audio = system::audio(&con);
+    hw.battery = system::batteries(&con);
     hw.sensors.extend(acpi_thermal());
     hw.sensors.extend(live_sensors(&hw));
 
@@ -512,7 +463,7 @@ fn cpu_activity(hw: &HardwareInfo) -> Vec<Sensor> {
          FROM Win32_PerfFormattedData_Counters_ProcessorInformation WHERE Name = '_Total'",
     );
     let Some(r) = rows.into_iter().next() else { return Vec::new() };
-    let base = r.processor_frequency.0.filter(|&f| f > 0).unwrap_or(hw.cpus.first().map(|c| c.max_mhz as u64).unwrap_or(0));
+    let base = r.processor_frequency.0.filter(|&f| f > 0).unwrap_or(hw.cpus.first().map(|c| c.base_mhz as u64).unwrap_or(0));
     let mut out = Vec::new();
     let mut push = |label: &str, kind, value: f64, unit: &str| {
         out.push(Sensor { label: label.into(), kind, value: Some(value), unit: unit.into(), site: SensorSite::Cpu, source: "windows".into() });
@@ -605,7 +556,7 @@ fn gpu_vram_from_registry(name: &str) -> Option<u64> {
     None
 }
 
-fn reg_string(key: &HSTRING, value: &str) -> Option<String> {
+pub(crate) fn reg_string(key: &HSTRING, value: &str) -> Option<String> {
     const RRF_RT_REG_SZ: REG_ROUTINE_FLAGS = REG_ROUTINE_FLAGS(0x2);
     let mut buf = [0u16; 256];
     let mut size = (buf.len() * 2) as u32;

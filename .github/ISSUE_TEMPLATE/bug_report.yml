@@ -1,0 +1,71 @@
+name: 🐞 Bug report
+description: Something does not work or looks wrong.
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time! Please remove anything personal (usernames, file paths you'd rather not share) before posting.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Syscura
+        2. Go to ...
+        3. Click ...
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Syscura?
+      options:
+        - Problems / fixes
+        - Hardware view or real photo
+        - Part pictures
+        - Background agent / service
+        - Installing or starting
+        - Command line
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Syscura version
+      placeholder: "0.1.0-beta.1 (shown by `syscura-cli status`)"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 Pro 24H2 (build 26100)"
+    validations:
+      required: true
+  - type: input
+    id: board
+    attributes:
+      label: Motherboard (if it is about hardware)
+      placeholder: "ASUS TUF GAMING X570-PRO WIFI II"
+  - type: textarea
+    id: log
+    attributes:
+      label: Agent log (optional)
+      description: The last lines of `C:\ProgramData\Syscura\agent.log`.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I removed personal information from what I pasted.
+          required: true

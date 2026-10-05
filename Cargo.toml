@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/syscura-*", "ui/src-tauri"]
+
+[workspace.package]
+version = "0.1.0-beta.1"
+edition = "2024"
+license = "MIT"
+authors = ["Hiibrarahmad"]
+repository = "https://github.com/hiibrarahmad/syscura"
+homepage = "https://github.com/hiibrarahmad/syscura"
+
+# Size and memory matter more than raw speed for an always-on agent.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

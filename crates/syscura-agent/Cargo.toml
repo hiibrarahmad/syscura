@@ -1,0 +1,18 @@
+[package]
+name = "syscura-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+syscura-core = { path = "../syscura-core" }
+syscura-hw = { path = "../syscura-hw" }
+syscura-rules = { path = "../syscura-rules" }
+syscura-sensors = { path = "../syscura-sensors" }
+syscura-store = { path = "../syscura-store" }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_IO", "Win32_System_Services"] }
+windows-service = "0.8.1"

@@ -1,0 +1,35 @@
+name: 🎯 False alarm or missed problem
+description: Syscura flagged something that is fine, or missed something that is not.
+labels: ["rules", "triage"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind?
+      options:
+        - It flagged something that is fine (false alarm)
+        - It got the "harmful" verdict wrong
+        - It missed a real problem
+        - A fix did the wrong thing
+    validations:
+      required: true
+  - type: input
+    id: title
+    attributes:
+      label: Problem title in Syscura
+      placeholder: 'A new service was installed · cpuz163'
+  - type: textarea
+    id: details
+    attributes:
+      label: What Syscura showed
+      description: The explanation and the "Details" section (copy from the Problems page or `syscura-cli problems`). Remove anything personal.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it is wrong
+      description: What is it really, and how do you know?
+    validations:
+      required: true

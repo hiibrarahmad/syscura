@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f2a2c"/>
+      <stop offset="1" stop-color="#071417"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5ef2c8"/>
+      <stop offset="1" stop-color="#1fb7a6"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#bg)"/>
+  <!-- chip outline with pins: the PC -->
+  <g stroke="#2c5b5a" stroke-width="22" stroke-linecap="round">
+    <path d="M352 196v-64M448 196v-64M576 196v-64M672 196v-64"/>
+    <path d="M352 892v-64M448 892v-64M576 892v-64M672 892v-64"/>
+    <path d="M196 352h-64M196 448h-64M196 576h-64M196 672h-64"/>
+    <path d="M892 352h-64M892 448h-64M892 576h-64M892 672h-64"/>
+  </g>
+  <rect x="196" y="196" width="632" height="632" rx="110" fill="none" stroke="#2c5b5a" stroke-width="26"/>
+  <!-- shield with a heartbeat: care + protection -->
+  <path d="M512 262l196 72v150c0 132-84 232-196 280-112-48-196-148-196-280V334z" fill="url(#mark)"/>
+  <path d="M352 520h88l38-74 58 150 40-104 32 28h64" fill="none" stroke="#062022" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

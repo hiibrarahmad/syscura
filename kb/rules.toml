@@ -1,0 +1,460 @@
+# Syscura knowledge base.
+#
+# Each rule turns Windows events into a finding: what happened in plain
+# language, whether it is harmful, what to do, and which fixes are safe.
+#
+# Fixes may only use the agent's fixed list of actions. Nothing here can run
+# an arbitrary command, and no action deletes data: actions start services,
+# rename (never delete) folders, run Microsoft's own repair tools, or ask
+# Microsoft Defender to scan.
+#
+# risk: safe    = cannot break anything; runs automatically
+#       caution = changes something, with undo or a restore point; asks first
+#       risky   = could change how the PC behaves; always asks, with a warning
+
+# ---------------------------------------------------------------- software
+
+[[rule]]
+id = "svc.crash"
+title = "A Windows service crashed"
+category = "software"
+severity = "warning"
+harmful = "maybe"
+group_by = "param1"
+explain = "The \"{param1}\" service stopped unexpectedly ({count} times so far). Windows usually restarts it, but repeated crashes can break the feature it provides."
+advice = "If it keeps happening, update or reinstall the program that owns the service. Repeated crashes of Windows' own services can mean damaged system files."
+[rule.match]
+channel = "System"
+provider = "Service Control Manager"
+event_ids = [7031, 7034]
+[[rule.fix]]
+action = "service.ensure_running"
+label = "Make sure the service is running again"
+risk = "safe"
+params = { service = "{param1}" }
+[[rule.fix]]
+action = "sfc.scan"
+label = "Check and repair Windows system files (SFC)"
+risk = "caution"
+[[rule.verify]]
+probe = "service_running"
+params = { service = "{param1}" }
+[[rule.verify]]
+probe = "quiet"
+params = { mins = "30" }
+
+[[rule]]
+id = "svc.start_failed"
+title = "A service failed to start"
+category = "software"
+severity = "warning"
+harmful = "maybe"
+group_by = "param1"
+explain = "Windows could not start the \"{param1}\" service ({count} times)."
+advice = "Often caused by an uninstalled program leaving its service behind, or a missing dependency. Syscura can try starting it again."
+[rule.match]
+channel = "System"
+provider = "Service Control Manager"
+event_ids = [7000, 7009, 7011, 7023, 7024]
+[[rule.fix]]
+action = "service.ensure_running"
+label = "Try starting the service again"
+risk = "safe"
+params = { service = "{param1}" }
+[[rule.verify]]
+probe = "service_running"
+params = { service = "{param1}" }
+
+[[rule]]
+id = "app.crash"
+title = "A program crashed"
+category = "software"
+severity = "warning"
+harmful = "no"
+group_by = "0"
+explain = "{0} crashed ({count} times). The fault was in {3}."
+advice = "Update the program. If the faulting module is a Windows file (ntdll.dll, KERNELBASE.dll) and many programs crash, run the system file check."
+[rule.match]
+channel = "Application"
+provider = "Application Error"
+event_ids = [1000]
+[[rule.fix]]
+action = "sfc.scan"
+label = "Check and repair Windows system files (SFC)"
+risk = "caution"
+
+[[rule]]
+id = "app.crash_dotnet"
+title = "A .NET program crashed"
+category = "software"
+severity = "warning"
+harmful = "no"
+explain = "A .NET program stopped with an unhandled error: {0}"
+advice = "Update the program or reinstall it. Not a problem with Windows itself."
+[rule.match]
+channel = "Application"
+provider = ".NET Runtime"
+event_ids = [1025, 1026]
+
+[[rule]]
+id = "app.hang"
+title = "A program stopped responding"
+category = "software"
+severity = "info"
+harmful = "no"
+group_by = "0"
+explain = "{0} stopped responding and was closed ({count} times)."
+advice = "Usually a problem in the program itself. Update it; if it happens with many programs, check the drive for errors."
+[rule.match]
+channel = "Application"
+provider = "Application Hang"
+event_ids = [1002]
+
+[[rule]]
+id = "sys.bsod"
+title = "Windows crashed (blue screen)"
+category = "software"
+severity = "critical"
+harmful = "maybe"
+explain = "The PC restarted after a blue-screen crash (stop code {param1}). Unsaved work was lost."
+advice = "Most blue screens come from drivers (graphics, network, storage) or unstable hardware settings such as memory overclocks (XMP/EXPO). Update drivers and the BIOS; if it repeats, test with XMP/EXPO turned off."
+[rule.match]
+channel = "System"
+provider = "WER-SystemErrorReporting"
+event_ids = [1001]
+[[rule.fix]]
+action = "restore_point"
+label = "Create a restore point first"
+risk = "safe"
+[[rule.fix]]
+action = "sfc.scan"
+label = "Check and repair Windows system files (SFC)"
+risk = "caution"
+[[rule.fix]]
+action = "dism.restore_health"
+label = "Repair the Windows image (DISM)"
+risk = "caution"
+
+[[rule]]
+id = "sys.power_loss"
+title = "The PC turned off without shutting down"
+category = "hardware"
+severity = "error"
+harmful = "maybe"
+explain = "Windows restarted without a clean shutdown: the power was cut, the power button was held, or the PC froze or crashed."
+advice = "Once is nothing to worry about. If it happens without you causing it, check the power supply, power cables and temperatures."
+[rule.match]
+channel = "System"
+provider = "Microsoft-Windows-Kernel-Power"
+event_ids = [41]
+
+# ---------------------------------------------------------------- hardware
+
+[[rule]]
+id = "hw.whea_corrected"
+title = "The hardware corrected an internal error"
+category = "hardware"
+severity = "warning"
+harmful = "maybe"
+explain = "The CPU, memory or a PCIe device reported an error that it corrected by itself ({count} times)."
+advice = "Occasional corrected errors are harmless. Many of them usually point to unstable overclocking (including XMP/EXPO memory profiles) or a PCIe device. Update the BIOS and test with overclocks turned off."
+[rule.match]
+channel = "System"
+provider = "WHEA-Logger"
+event_ids = [17, 19, 47]
+
+[[rule]]
+id = "hw.whea_fatal"
+title = "A fatal hardware error"
+category = "hardware"
+severity = "critical"
+harmful = "yes"
+explain = "The hardware reported an error it could not correct. This usually crashes the PC."
+advice = "Remove overclocks (CPU, memory XMP/EXPO, GPU), update the BIOS, reseat memory and graphics card. If it continues, test the memory with Windows Memory Diagnostic."
+[rule.match]
+channel = "System"
+provider = "WHEA-Logger"
+event_ids = [18, 20, 46]
+
+[[rule]]
+id = "disk.errors"
+title = "A drive reported read or write errors"
+category = "storage"
+severity = "error"
+harmful = "yes"
+explain = "Windows had trouble reading or writing a drive ({count} times). Data on it may be at risk."
+advice = "Back up important files now. Check the drive's health on the Hardware page. Loose or old SATA cables cause this too."
+[rule.match]
+channel = "System"
+provider = "disk"
+event_ids = [7, 11, 51, 153]
+[[rule.fix]]
+action = "chkdsk.scan"
+label = "Scan drive C: for file system errors (read-only, changes nothing)"
+risk = "safe"
+auto = false
+
+[[rule]]
+id = "disk.ntfs"
+title = "The file system reported damage"
+category = "storage"
+severity = "error"
+harmful = "yes"
+explain = "NTFS found a problem in the file system structure."
+advice = "Back up important files. A file system scan can find the damage; Windows repairs it at the next restart."
+[rule.match]
+channel = "System"
+provider = "Ntfs"
+event_ids = [55, 98]
+# Event 98 is also "volume is healthy" at information level.
+levels = [1, 2, 3]
+[[rule.fix]]
+action = "chkdsk.scan"
+label = "Scan drive C: for file system errors (read-only, changes nothing)"
+risk = "safe"
+auto = false
+
+[[rule]]
+id = "disk.low_space"
+title = "A drive is almost full"
+category = "storage"
+severity = "warning"
+harmful = "maybe"
+explain = "A drive is running out of free space."
+advice = "Windows and programs misbehave when a drive is nearly full. Use Settings > System > Storage to free space (Storage Sense can remove temporary files safely)."
+[rule.match]
+channel = "System"
+provider = "srv"
+event_ids = [2013]
+
+[[rule]]
+id = "drv.failed"
+title = "A driver failed to load"
+category = "software"
+severity = "warning"
+harmful = "maybe"
+group_by = "param1"
+explain = "The driver \"{param1}\" did not load ({count} times)."
+advice = "Install the latest driver for that device from its maker. Leftover drivers from removed devices also cause this and are harmless."
+[rule.match]
+channel = "System"
+provider = "Service Control Manager"
+event_ids = [7026]
+
+[[rule]]
+id = "drv.device"
+title = "A device's driver did not start"
+category = "software"
+severity = "warning"
+harmful = "no"
+explain = "Windows could not load the driver for a device ({count} times)."
+advice = "Check Device Manager for a device with a warning sign and update its driver."
+[rule.match]
+channel = "System"
+provider = "Microsoft-Windows-Kernel-PnP"
+event_ids = [219]
+
+# ---------------------------------------------------------------- updates
+
+[[rule]]
+id = "wu.install_failed"
+title = "A Windows update failed to install"
+category = "software"
+severity = "error"
+harmful = "maybe"
+explain = "Windows Update could not install \"{updateTitle}\" (error {errorCode})."
+advice = "Missing updates leave security holes open. The usual fix is to clear Windows Update's download cache and repair system files."
+[rule.match]
+channel = "System"
+provider = "WindowsUpdateClient"
+event_ids = [20]
+[[rule.fix]]
+action = "service.ensure_running"
+label = "Make sure the Windows Update service is running"
+risk = "safe"
+params = { service = "wuauserv" }
+[[rule.fix]]
+action = "wu.reset_cache"
+label = "Reset Windows Update's download cache (old cache kept, can be undone)"
+risk = "caution"
+[[rule.fix]]
+action = "dism.restore_health"
+label = "Repair the Windows image (DISM)"
+risk = "caution"
+[[rule.verify]]
+probe = "quiet"
+params = { mins = "1440" }
+
+# ---------------------------------------------------------------- network
+
+[[rule]]
+id = "net.dns"
+title = "Websites are slow to find (DNS timeouts)"
+category = "network"
+severity = "warning"
+harmful = "no"
+explain = "Name lookups timed out {count} times recently (last: {QueryName})."
+advice = "Usually the router or internet provider. Restarting the router helps; clearing Windows' DNS cache is harmless."
+[rule.match]
+channel = "System"
+provider = "DNS-Client"
+event_ids = [1014]
+[rule.threshold]
+count = 5
+within_mins = 30
+[[rule.fix]]
+action = "dns.flush"
+label = "Clear the DNS cache"
+risk = "safe"
+[[rule.verify]]
+probe = "quiet"
+params = { mins = "30" }
+
+[[rule]]
+id = "net.time"
+title = "The clock could not sync"
+category = "network"
+severity = "info"
+harmful = "no"
+explain = "Windows could not reach the time server."
+advice = "A wrong clock breaks secure websites and updates. Syscura can ask Windows to sync again."
+[rule.match]
+channel = "System"
+provider = "Time-Service"
+event_ids = [129, 134]
+[[rule.fix]]
+action = "time.resync"
+label = "Sync the clock now"
+risk = "safe"
+
+# ---------------------------------------------------------------- security
+
+[[rule]]
+id = "sec.threat"
+title = "Microsoft Defender found a threat"
+category = "security"
+severity = "critical"
+harmful = "yes"
+explain = "Defender detected \"{Threat Name}\" ({Severity Name}) in {Path}. Action: {Action Name}."
+advice = "Defender normally quarantines the file by itself. Run a full scan to make sure nothing else is hiding, and change passwords if the threat was a password stealer."
+group_by = "Threat Name"
+[rule.match]
+channel = "Microsoft-Windows-Windows Defender/Operational"
+event_ids = [1006, 1015, 1116, 1117]
+[[rule.fix]]
+action = "defender.quick_scan"
+label = "Run a Defender quick scan"
+risk = "safe"
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+[[rule]]
+id = "sec.defender_off"
+title = "Microsoft Defender protection was turned off"
+category = "security"
+severity = "error"
+harmful = "yes"
+explain = "Part of Defender's protection was switched off (event {event_id})."
+advice = "If you did not do this yourself, malware may have done it. Turn real-time protection back on and run a scan."
+[rule.match]
+channel = "Microsoft-Windows-Windows Defender/Operational"
+event_ids = [5001, 5010, 5012]
+[[rule.fix]]
+action = "defender.enable_realtime"
+label = "Turn real-time protection back on"
+risk = "caution"
+[[rule.fix]]
+action = "defender.quick_scan"
+label = "Run a Defender quick scan"
+risk = "safe"
+
+[[rule]]
+id = "sec.defender_update"
+title = "Defender could not update its virus definitions"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+explain = "Defender's virus definitions failed to update, so new threats may be missed."
+advice = "Usually a temporary network problem. Syscura can retry the update."
+[rule.match]
+channel = "Microsoft-Windows-Windows Defender/Operational"
+event_ids = [2001]
+[[rule.fix]]
+action = "defender.update"
+label = "Update virus definitions now"
+risk = "safe"
+
+[[rule]]
+id = "sec.new_service"
+title = "A new service was installed"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "ServiceName"
+enrich = "service_image"
+explain = "\"{ServiceName}\" was installed as a service. It runs {ImagePath} as {AccountName}, start type: {StartType}."
+advice = "Installers add services all the time. It deserves a look if you did not install anything just now, if the program is not signed by a known company, or if it runs from a user, Temp or Downloads folder."
+[rule.match]
+channel = "System"
+provider = "Service Control Manager"
+event_ids = [7045]
+[[rule.fix]]
+action = "defender.quick_scan"
+label = "Run a Defender quick scan"
+risk = "safe"
+[[rule.fix]]
+action = "service.disable"
+label = "Disable this service (can be undone)"
+risk = "risky"
+params = { service = "{ServiceName}" }
+
+[[rule]]
+id = "sec.log_cleared"
+title = "An event log was cleared"
+category = "security"
+severity = "error"
+harmful = "maybe"
+explain = "The {Channel} event log was cleared by {SubjectUserName}."
+advice = "Some tools clear logs during cleanup, but attackers also do it to hide their tracks. If you did not do this, run a full scan."
+[rule.match]
+channel = "System"
+provider = "Microsoft-Windows-Eventlog"
+event_ids = [104]
+[[rule.fix]]
+action = "defender.quick_scan"
+label = "Run a Defender quick scan"
+risk = "safe"
+
+[[rule]]
+id = "sec.powershell"
+title = "A suspicious PowerShell script ran"
+category = "security"
+severity = "error"
+harmful = "maybe"
+explain = "Windows flagged a PowerShell script as suspicious: {ScriptBlockText}"
+advice = "Windows marks scripts that use techniques common in malware. If you were not running scripts or installing software, scan the PC."
+[rule.match]
+channel = "Microsoft-Windows-PowerShell/Operational"
+event_ids = [4104]
+levels = [3]
+[[rule.fix]]
+action = "defender.quick_scan"
+label = "Run a Defender quick scan"
+risk = "safe"
+
+# ---------------------------------------------------------------- noise
+
+[[rule]]
+id = "noise.dcom"
+title = "DCOM permission warning (harmless)"
+category = "noise"
+severity = "info"
+harmful = "no"
+explain = "A built-in Windows component logged a DCOM permission message ({count} times). Microsoft documents this as expected behaviour."
+advice = "Nothing to do. These messages appear on almost every Windows PC and do not affect it."
+[rule.match]
+channel = "System"
+provider = "DistributedCOM"
+event_ids = [10010, 10016]

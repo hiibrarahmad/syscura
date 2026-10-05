@@ -1,0 +1,272 @@
+//! Findings (problems) and the fixes tried on them.
+
+use std::collections::BTreeMap;
+
+use rusqlite::{OptionalExtension, params};
+use syscura_core::findings::{FindingStatus, FixAttempt};
+
+use crate::{Result, Store};
+
+pub(crate) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS findings (
+    id       INTEGER PRIMARY KEY,
+    rule_id  TEXT    NOT NULL,
+    grp      TEXT    NOT NULL,
+    first_ts INTEGER NOT NULL,
+    last_ts  INTEGER NOT NULL,
+    count    INTEGER NOT NULL,
+    status   TEXT    NOT NULL,
+    evidence TEXT    NOT NULL,
+    UNIQUE (rule_id, grp)
+);
+CREATE TABLE IF NOT EXISTS fix_attempts (
+    id         INTEGER PRIMARY KEY,
+    finding_id INTEGER NOT NULL REFERENCES findings(id),
+    ts         INTEGER NOT NULL,
+    fix_index  INTEGER NOT NULL,
+    label      TEXT    NOT NULL,
+    automatic  INTEGER NOT NULL,
+    ok         INTEGER NOT NULL,
+    verified   INTEGER,
+    message    TEXT    NOT NULL,
+    undo       TEXT,
+    undone     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS fix_attempts_finding ON fix_attempts (finding_id);
+";
+
+/// A finding row without the rule-derived text (the agent adds that).
+#[derive(Debug, Clone)]
+pub struct FindingRow {
+    pub id: i64,
+    pub rule_id: String,
+    pub group: String,
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub count: u64,
+    pub status: FindingStatus,
+    pub evidence: BTreeMap<String, String>,
+}
+
+/// What recording a hit did to the finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    /// A finding that did not exist before.
+    New(i64),
+    /// An open finding got another occurrence.
+    Repeat(i64),
+    /// A finding marked fixed came back: the fix did not hold.
+    Returned(i64),
+    /// The user ignores this finding; only the counter moved.
+    Ignored(i64),
+}
+
+impl Store {
+    /// Adds one occurrence of (rule, group).
+    pub fn record_hit(&self, rule_id: &str, group: &str, ts: i64, evidence: &BTreeMap<String, String>) -> Result<Recorded> {
+        let ev = serde_json::to_string(evidence).unwrap_or_else(|_| "{}".into());
+        let existing: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, status FROM findings WHERE rule_id = ?1 AND grp = ?2",
+                params![rule_id, group],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match existing {
+            None => {
+                self.conn.execute(
+                    "INSERT INTO findings (rule_id, grp, first_ts, last_ts, count, status, evidence)
+                     VALUES (?1, ?2, ?3, ?3, 1, 'open', ?4)",
+                    params![rule_id, group, ts, ev],
+                )?;
+                Ok(Recorded::New(self.conn.last_insert_rowid()))
+            }
+            Some((id, status)) => {
+                let status = FindingStatus::parse(&status);
+                let new_status = match status {
+                    FindingStatus::Fixed => FindingStatus::FixFailed,
+                    other => other,
+                };
+                self.conn.execute(
+                    "UPDATE findings SET last_ts = MAX(last_ts, ?2), count = count + 1, status = ?3, evidence = ?4 WHERE id = ?1",
+                    params![id, ts, new_status.as_str(), ev],
+                )?;
+                Ok(match status {
+                    FindingStatus::Fixed => {
+                        // The latest fix did not hold.
+                        self.conn.execute(
+                            "UPDATE fix_attempts SET verified = 0
+                             WHERE id = (SELECT MAX(id) FROM fix_attempts WHERE finding_id = ?1)",
+                            [id],
+                        )?;
+                        Recorded::Returned(id)
+                    }
+                    FindingStatus::Ignored => Recorded::Ignored(id),
+                    _ => Recorded::Repeat(id),
+                })
+            }
+        }
+    }
+
+    pub fn set_finding_status(&self, id: i64, status: FindingStatus) -> Result<()> {
+        self.conn.execute("UPDATE findings SET status = ?2 WHERE id = ?1", params![id, status.as_str()])?;
+        Ok(())
+    }
+
+    pub fn finding(&self, id: i64) -> Result<Option<FindingRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, rule_id, grp, first_ts, last_ts, count, status, evidence FROM findings WHERE id = ?1",
+                [id],
+                row_to_finding,
+            )
+            .optional()
+    }
+
+    /// Newest first. Without `include_closed`, ignored findings and fixes
+    /// verified more than a day ago are left out.
+    pub fn findings(&self, include_closed: bool, limit: u32) -> Result<Vec<FindingRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, rule_id, grp, first_ts, last_ts, count, status, evidence FROM findings
+             ORDER BY last_ts DESC LIMIT ?1",
+        )?;
+        let day_ago = syscura_core::now_ms() - 24 * 60 * 60 * 1000;
+        let rows = stmt.query_map([limit], row_to_finding)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let f = row?;
+            let closed = f.status == FindingStatus::Ignored || (f.status == FindingStatus::Fixed && f.last_ts < day_ago);
+            if include_closed || !closed {
+                out.push(f);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn add_attempt(&self, finding_id: i64, a: &FixAttempt) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO fix_attempts (finding_id, ts, fix_index, label, automatic, ok, verified, message, undo)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![finding_id, a.ts, a.fix_index as i64, a.label, a.automatic, a.ok, a.verified, a.message, a.undo],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn set_attempt_verified(&self, attempt_id: i64, verified: bool, message: Option<&str>) -> Result<()> {
+        match message {
+            Some(m) => self.conn.execute(
+                "UPDATE fix_attempts SET verified = ?2, message = message || ' ' || ?3 WHERE id = ?1",
+                params![attempt_id, verified, m],
+            )?,
+            None => self.conn.execute("UPDATE fix_attempts SET verified = ?2 WHERE id = ?1", params![attempt_id, verified])?,
+        };
+        Ok(())
+    }
+
+    pub fn mark_undone(&self, attempt_id: i64) -> Result<()> {
+        self.conn.execute("UPDATE fix_attempts SET undone = 1 WHERE id = ?1", [attempt_id])?;
+        Ok(())
+    }
+
+    /// (finding id, attempt) for one attempt.
+    pub fn attempt(&self, attempt_id: i64) -> Result<Option<(i64, FixAttempt)>> {
+        self.conn
+            .query_row(
+                "SELECT finding_id, id, ts, fix_index, label, automatic, ok, verified, message, undo, undone
+                 FROM fix_attempts WHERE id = ?1",
+                [attempt_id],
+                |r| Ok((r.get(0)?, row_to_attempt(r, 1)?)),
+            )
+            .optional()
+    }
+
+    pub fn attempts(&self, finding_id: i64) -> Result<Vec<FixAttempt>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, ts, fix_index, label, automatic, ok, verified, message, undo, undone
+             FROM fix_attempts WHERE finding_id = ?1 ORDER BY id DESC LIMIT 20",
+        )?;
+        let rows = stmt.query_map([finding_id], |r| row_to_attempt(r, 0))?;
+        rows.collect()
+    }
+
+    /// Automatic fixes started since `since_ms` (for rate limiting).
+    pub fn automatic_attempts_since(&self, since_ms: i64) -> Result<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM fix_attempts WHERE automatic = 1 AND ts >= ?1", [since_ms], |r| r.get::<_, i64>(0))
+            .map(|n| n as u64)
+    }
+
+    /// How many times this fix already failed for this finding.
+    pub fn failed_attempts(&self, finding_id: i64, fix_index: usize) -> Result<u64> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM fix_attempts WHERE finding_id = ?1 AND fix_index = ?2 AND (ok = 0 OR verified = 0)",
+                params![finding_id, fix_index as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u64)
+    }
+}
+
+fn row_to_finding(r: &rusqlite::Row<'_>) -> rusqlite::Result<FindingRow> {
+    let ev: String = r.get(7)?;
+    Ok(FindingRow {
+        id: r.get(0)?,
+        rule_id: r.get(1)?,
+        group: r.get(2)?,
+        first_ts: r.get(3)?,
+        last_ts: r.get(4)?,
+        count: r.get::<_, i64>(5)? as u64,
+        status: FindingStatus::parse(&r.get::<_, String>(6)?),
+        evidence: serde_json::from_str(&ev).unwrap_or_default(),
+    })
+}
+
+fn row_to_attempt(r: &rusqlite::Row<'_>, o: usize) -> rusqlite::Result<FixAttempt> {
+    Ok(FixAttempt {
+        id: r.get(o)?,
+        ts: r.get(o + 1)?,
+        fix_index: r.get::<_, i64>(o + 2)? as usize,
+        label: r.get(o + 3)?,
+        automatic: r.get(o + 4)?,
+        ok: r.get(o + 5)?,
+        verified: r.get(o + 6)?,
+        message: r.get(o + 7)?,
+        undo: r.get(o + 8)?,
+        undone: r.get(o + 9)?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attempt(ok: bool) -> FixAttempt {
+        FixAttempt { id: 0, ts: 5, fix_index: 0, label: "Start it".into(), automatic: true, ok, verified: None, message: "done".into(), undo: None, undone: false }
+    }
+
+    #[test]
+    fn hit_lifecycle() {
+        let s = Store::open_in_memory().unwrap();
+        let ev = BTreeMap::from([("param1".to_string(), "Spooler".to_string())]);
+        let Recorded::New(id) = s.record_hit("svc.crash", "Spooler", 10, &ev).unwrap() else { panic!("expected new") };
+        assert_eq!(s.record_hit("svc.crash", "Spooler", 20, &ev).unwrap(), Recorded::Repeat(id));
+        assert_eq!(s.finding(id).unwrap().unwrap().count, 2);
+
+        // Fixed, then the problem comes back: the fix did not hold.
+        let a = s.add_attempt(id, &attempt(true)).unwrap();
+        s.set_finding_status(id, FindingStatus::Fixed).unwrap();
+        assert_eq!(s.record_hit("svc.crash", "Spooler", 30, &ev).unwrap(), Recorded::Returned(id));
+        assert_eq!(s.finding(id).unwrap().unwrap().status, FindingStatus::FixFailed);
+        assert_eq!(s.attempt(a).unwrap().unwrap().1.verified, Some(false));
+        assert_eq!(s.failed_attempts(id, 0).unwrap(), 1);
+
+        // Ignored findings only count.
+        s.set_finding_status(id, FindingStatus::Ignored).unwrap();
+        assert_eq!(s.record_hit("svc.crash", "Spooler", 40, &ev).unwrap(), Recorded::Ignored(id));
+        assert!(s.findings(false, 50).unwrap().is_empty());
+        assert_eq!(s.findings(true, 50).unwrap().len(), 1);
+        assert_eq!(s.automatic_attempts_since(0).unwrap(), 1);
+    }
+}

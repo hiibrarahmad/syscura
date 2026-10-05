@@ -1,0 +1,10 @@
+[package]
+name = "syscura-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+syscura-core = { path = "../syscura-core" }
+toml = "1.1.6"

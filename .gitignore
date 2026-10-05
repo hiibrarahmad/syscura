@@ -1,0 +1,9 @@
+/target
+*.db
+*.db-wal
+*.db-shm
+node_modules/
+ui/dist/
+ui/src-tauri/gen/
+.vscode/
+*.log

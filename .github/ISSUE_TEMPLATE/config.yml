@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions and ideas
+    url: https://github.com/hiibrarahmad/syscura/discussions
+    about: Ask anything, share ideas, show your setup.
+  - name: 🔒 Report a security problem privately
+    url: https://github.com/hiibrarahmad/syscura/security/advisories/new
+    about: Please do not report vulnerabilities in public issues.

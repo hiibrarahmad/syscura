@@ -27,6 +27,13 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Ship the agent next to the app (Tauri checks the sidecar files exist)
+        shell: pwsh
+        run: |
+          cargo build --release -p syscura-agent -p syscura-cli
+          New-Item -ItemType Directory -Force ui\src-tauri\binaries | Out-Null
+          Copy-Item target\release\syscura-agent.exe ui\src-tauri\binaries\syscura-agent-x86_64-pc-windows-msvc.exe
+          Copy-Item target\release\syscura-cli.exe ui\src-tauri\binaries\syscura-cli-x86_64-pc-windows-msvc.exe
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests

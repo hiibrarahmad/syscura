@@ -19,3 +19,5 @@ syscura-hw = { path = "../../crates/syscura-hw" }
 syscura-online = { path = "../../crates/syscura-online" }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_SystemInformation"] }
 tauri-plugin-notification = "2.5.1"
+ureq = "3.4.2"
+sha2 = "0.10"

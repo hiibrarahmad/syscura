@@ -184,6 +184,9 @@ pub enum Request {
     SetVerdict { finding: i64, harmful: String, by: String },
     /// Every running program, with details.
     Processes,
+    /// Check now whether the files of file-based problems still exist,
+    /// and close the problems whose files are gone.
+    RecheckFiles,
     /// Ask a console-mode agent to exit (used before installing the
     /// service). Refused when running as a service.
     Shutdown,

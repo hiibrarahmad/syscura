@@ -1,3 +1,5 @@
+!include "FileFunc.nsh"
+
 ; Syscura installer hooks (Tauri NSIS bundler). The installer runs as
 ; administrator (per-machine install), so it can set up the service.
 ; Housekeeping commands run with nsExec::Exec (output hidden): on a fresh
@@ -33,6 +35,15 @@
   SetShellVarContext all
   CreateShortCut "$SMSTARTUP\Syscura.lnk" "$INSTDIR\Syscura.exe" "--tray" "$INSTDIR\Syscura.exe" 0
   DetailPrint "Syscura will start in the taskbar tray after every restart."
+  ; An update started from inside Syscura: open it again, as the signed-in
+  ; user (not as administrator).
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/SYSCURA_RELAUNCH" $R1
+  ${IfNot} ${Errors}
+    nsis_tauri_utils::RunAsUser "$INSTDIR\Syscura.exe" ""
+    Pop $R1
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

@@ -75,6 +75,7 @@ fn run(db_path: PathBuf, rx: Receiver<Job>) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+        resolve_gone_files(&store, None);
         // Fixes whose problem stayed away for the whole quiet period worked.
         let now = now_ms();
         pending.retain(|p| {
@@ -229,6 +230,67 @@ fn apply(store: &Store, finding_id: i64, plan: Plan, automatic: bool) -> Option<
     }
 }
 
+/// Problems about a file (a virus Defender found, a suspicious program)
+/// are solved once the file is gone: deleted, quarantined or removed by
+/// Defender. Checks every such open problem (or just `only`) and closes
+/// those whose files no longer exist. Returns how many it closed.
+pub fn resolve_gone_files(store: &Store, only: Option<i64>) -> usize {
+    const FILE_RULES: &[&str] = &["sec.threat", "proc.fake_system", "proc.unsigned_user", "sec.startup_unsigned"];
+    let Ok(rows) = store.findings(false, 500) else { return 0 };
+    let mut closed = 0;
+    for f in rows {
+        if only.is_some_and(|id| id != f.id)
+            || !FILE_RULES.contains(&f.rule_id.as_str())
+            || !matches!(f.status, FindingStatus::Open | FindingStatus::FixFailed)
+        {
+            continue;
+        }
+        let files = affected_files(f.evidence.get("Path").map(String::as_str).unwrap_or(""));
+        if files.is_empty() || files.iter().any(|p| std::path::Path::new(p).exists()) {
+            continue;
+        }
+        let attempt = FixAttempt {
+            id: 0,
+            ts: now_ms(),
+            fix_index: usize::MAX,
+            label: "Checked the file".into(),
+            automatic: false,
+            ok: true,
+            verified: Some(true),
+            message: format!(
+                "{} no longer exist{} (deleted, or removed by Defender), so this problem is solved.",
+                files.join(", "),
+                if files.len() == 1 { "s" } else { "" }
+            ),
+            undo: None,
+            undone: false,
+            outcome: "gone".into(),
+        };
+        if store.add_attempt(f.id, &attempt).is_ok() && store.set_finding_status(f.id, FindingStatus::Fixed).is_ok() {
+            log::info(&format!("finding {} solved: its file is gone", f.id));
+            closed += 1;
+        }
+    }
+    closed
+}
+
+/// Full file paths in an evidence "Path" field. Defender writes several,
+/// for example `containerfile:_D:\x.iso; file:_D:\x.iso->(Rar)a.exe`.
+pub fn affected_files(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split(';') {
+        let part = part.trim();
+        let part = part.split_once(":_").map_or(part, |(_, rest)| rest);
+        let part = part.split("->").next().unwrap_or("").trim();
+        let b = part.as_bytes();
+        let full = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+        if full && !part.ends_with('\\') && !out.iter().any(|o| o.eq_ignore_ascii_case(part)) {
+            out.push(part.to_string());
+        }
+    }
+    out
+}
+
 fn undo(store: &Store, attempt_id: i64) {
     let Ok(Some((finding_id, attempt))) = store.attempt(attempt_id) else { return };
     let Some(token) = attempt.undo.filter(|_| !attempt.undone) else { return };
@@ -268,4 +330,17 @@ pub fn auto_fix_choice(engine: &Engine, store: &Store, finding_id: i64, rule_id:
             && store.failed_attempts(finding_id, i).unwrap_or(0) < 2;
         ok.then_some(i)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::affected_files;
+
+    #[test]
+    fn reads_defender_paths() {
+        let raw = r"containerfile:_D:\a b\Setup.iso; file:_D:\a b\Setup.iso->(UDF)Setup.exe; file:_D:\a b\Setup.iso";
+        assert_eq!(affected_files(raw), vec![r"D:\a b\Setup.iso".to_string()]);
+        assert_eq!(affected_files(r"C:\Users\x\AppData\Local\Temp\svchost.exe"), vec![r"C:\Users\x\AppData\Local\Temp\svchost.exe".to_string()]);
+        assert!(affected_files("").is_empty());
+    }
 }

@@ -168,6 +168,55 @@ pub fn parse_reply(text: &str, catalog: &[ActionInfo]) -> Result<Analysis, Strin
     Ok(a)
 }
 
+/// Specifications found online for details Windows does not report.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SpecLookup {
+    /// Field name (exactly as asked) -> value. Unknown fields are left out.
+    pub values: BTreeMap<String, String>,
+    pub note: String,
+    pub sources: Vec<Source>,
+    pub model: String,
+}
+
+pub const SPEC_INSTRUCTION: &str = "You look up the official hardware specifications of a PC or \
+    motherboard, so a system tool can fill in details Windows does not report.\n\
+    Rules:\n\
+    - Use Google Search. Prefer the maker's own product and support pages, then well-known spec databases.\n\
+    - Only fill a field when a reliable source states it for THIS exact model. Never guess or \
+      estimate; leave the field out when you are not sure.\n\
+    - Keep values short, with units (for example \"128 GB\", \"4\", \"ATX\", \"DDR4-3200\").\n\
+    - Reply with ONLY a JSON object: {\"values\": {\"<field exactly as given>\": \"<value>\"}, \
+      \"note\": \"<one short sentence about the source>\"}";
+
+/// The user-turn text for a spec lookup.
+pub fn spec_prompt(device: &str, fields: &[String]) -> String {
+    let mut out = format!("Device: {device}\n\nFind these specifications:\n");
+    for f in fields.iter().take(40) {
+        out.push_str(&format!("- {f}\n"));
+    }
+    out
+}
+
+/// Reads a spec lookup reply. Keeps only fields that were asked for, with
+/// short, non-empty values.
+pub fn parse_specs(text: &str, fields: &[String]) -> Result<SpecLookup, String> {
+    let start = text.find('{').ok_or("The AI did not answer in the expected format.")?;
+    let end = text.rfind('}').ok_or("The AI did not answer in the expected format.")?;
+    if end < start {
+        return Err("The AI did not answer in the expected format.".into());
+    }
+    let mut s: SpecLookup = serde_json::from_str(&text[start..=end]).map_err(|e| format!("Could not read the AI's answer: {e}"))?;
+    s.values.retain(|k, v| {
+        let v = v.trim();
+        fields.iter().any(|f| f == k)
+            && !v.is_empty()
+            && v.chars().count() <= 120
+            && !["unknown", "n/a", "not specified", "not available", "-"].contains(&v.to_ascii_lowercase().as_str())
+    });
+    Ok(s)
+}
+
 /// Private details that must not leave the PC.
 #[derive(Debug, Clone, Default)]
 pub struct Secrets {
@@ -330,6 +379,16 @@ mod tests {
         assert_eq!(a.fixed, "no");
         let b = parse_reply(r#"{"summary":"x","fixed":"probably"}"#, &catalog()).unwrap();
         assert_eq!(b.fixed, "", "anything else counts as no verdict");
+    }
+
+    #[test]
+    fn spec_answers_keep_only_asked_fields() {
+        let fields = vec!["Motherboard > Memory slots".to_string(), "Motherboard > Form factor".to_string()];
+        let reply = r#"Here: {"values": {"Motherboard > Memory slots": "4", "Motherboard > Form factor": "unknown", "Price": "$200"}, "note": "asus.com"}"#;
+        let s = parse_specs(reply, &fields).unwrap();
+        assert_eq!(s.values.len(), 1);
+        assert_eq!(s.values["Motherboard > Memory slots"], "4");
+        assert!(spec_prompt("ASUS TUF X570", &fields).contains("- Motherboard > Form factor"));
     }
 
     #[test]

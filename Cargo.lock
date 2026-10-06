@@ -3520,7 +3520,7 @@ dependencies = [
 
 [[package]]
 name = "syscura-agent"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3535,7 +3535,7 @@ dependencies = [
 
 [[package]]
 name = "syscura-cli"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "serde_json",
  "syscura-core",
@@ -3543,7 +3543,7 @@ dependencies = [
 
 [[package]]
 name = "syscura-core"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3551,7 +3551,7 @@ dependencies = [
 
 [[package]]
 name = "syscura-hw"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "syscura-online"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3573,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "syscura-rules"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "serde",
  "syscura-core",
@@ -3582,7 +3582,7 @@ dependencies = [
 
 [[package]]
 name = "syscura-sensors"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "quick-xml",
  "syscura-core",
@@ -3591,7 +3591,7 @@ dependencies = [
 
 [[package]]
 name = "syscura-store"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -3600,10 +3600,11 @@ dependencies = [
 
 [[package]]
 name = "syscura-ui"
-version = "0.1.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "syscura-core",
  "syscura-hw",
  "syscura-online",
@@ -3612,6 +3613,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "ureq",
  "windows",
 ]
 

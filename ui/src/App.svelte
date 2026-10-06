@@ -68,7 +68,9 @@
     } catch { /* keep last readings */ }
   }
 
+  let updateTo = $state("");
   onMount(() => {
+    api.updateCheck(false).then((u) => { if (u.available) updateTo = u.latest; }).catch(() => {});
     invoke<string | null>("initial_view").then((v) => {
       if (nav.some((n) => n.id === v)) view = v as View;
     }).catch(() => {});
@@ -109,6 +111,7 @@
         </button>
       {/each}
     </nav>
+    {#if updateTo}<button class="btn btn--sm" title="A newer Syscura is on GitHub" onclick={() => go("settings")}>Update to {updateTo}</button>{/if}
     <span class="status" title={ai.status.configured ? (ai.status.auto_fix ? "AI fixes safe problems automatically" : "AI suggests fixes") : "AI help is not set up"}>
       <span class="dot" class:off={!status}></span>{status ? "Protection on" : "Protection off"}
     </span>

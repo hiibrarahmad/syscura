@@ -7,6 +7,7 @@
 
 mod backup;
 mod tray;
+mod update;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -29,6 +30,9 @@ struct Settings {
 }
 
 struct AppState {
+    /// The last update check: (when, result), so GitHub is asked at most
+    /// every few hours.
+    update: Mutex<Option<(std::time::Instant, update::UpdateInfo)>>,
     hardware: Mutex<Option<HardwareInfo>>,
     backup: Arc<Mutex<backup::Status>>,
     settings: Mutex<Settings>,
@@ -150,8 +154,80 @@ async fn processes() -> Result<Vec<syscura_core::ProcessInfo>, String> {
     }
 }
 
-/// Moves one file to the Recycle Bin (it can be restored from there). The
-/// app asks the person first; Windows' own folders are refused.
+/// Asks the AI to look up specifications Windows did not report, for this
+/// exact PC. `device` names it (maker, model, board); `fields` are the
+/// missing details as "Section > Detail".
+#[tauri::command]
+async fn hw_lookup(app: tauri::AppHandle, device: String, fields: Vec<String>) -> Result<syscura_online::SpecLookup, String> {
+    let key = secrets::load_key().ok_or("Add your free Gemini key in Settings first.")?;
+    let state = app.state::<AppState>();
+    let model = state.settings().ai_model;
+    blocking(move || Gemini::new(&key).lookup_specs(model.as_deref(), &device, &fields)).await?
+}
+
+/// The newest release on GitHub. Cached for 6 hours unless `force`.
+pub async fn update_info(app: &tauri::AppHandle, force: bool) -> Result<update::UpdateInfo, String> {
+    let state = app.state::<AppState>();
+    if !force
+        && let Some((when, info)) = state.update.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && when.elapsed() < std::time::Duration::from_secs(6 * 3600)
+    {
+        return Ok(info.clone());
+    }
+    let info = blocking(update::check).await??;
+    *state.update.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), info.clone()));
+    Ok(info)
+}
+
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle, force: bool) -> Result<update::UpdateInfo, String> {
+    update_info(&app, force).await
+}
+
+/// Downloads, verifies and starts the update, then closes Syscura so the
+/// installer can replace it. The installer opens Syscura again.
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle) -> Result<String, String> {
+    let info = update_info(&app, true).await?;
+    blocking(move || update::install(&info)).await??;
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        handle.exit(0);
+    });
+    Ok("Installing the update. Syscura closes now and opens again when it is done.".into())
+}
+
+#[tauri::command]
+async fn recheck_files() -> Result<String, String> {
+    done(Request::RecheckFiles).await
+}
+
+/// Which of these paths still exist.
+#[tauri::command]
+fn paths_exist(paths: Vec<String>) -> Vec<bool> {
+    paths.iter().take(50).map(|p| std::path::Path::new(p).exists()).collect()
+}
+
+/// Folders that must never be deleted as a whole.
+fn protected_folder(path: &str) -> bool {
+    let p = path.trim_end_matches('\\').to_ascii_lowercase();
+    let env = |k: &str| std::env::var(k).unwrap_or_default().trim_end_matches('\\').to_ascii_lowercase();
+    let windir = env("SystemRoot");
+    let profile = env("USERPROFILE");
+    let users = std::path::Path::new(&profile).parent().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+    p.len() <= 3 // a drive root such as D:
+        || p == windir || p.starts_with(&format!("{windir}\\"))
+        || p == env("ProgramFiles") || p == env("ProgramFiles(x86)") || p == env("ProgramData")
+        || p == profile || p == users
+        || ["desktop", "documents", "downloads", "pictures", "music", "videos", "appdata"]
+            .iter()
+            .any(|f| p == format!("{profile}\\{f}"))
+}
+
+/// Moves a file, or a whole folder, to the Recycle Bin (it can be restored
+/// from there). The app asks the person first; Windows' own folders and
+/// other important folders are refused.
 #[tauri::command]
 async fn recycle_file(path: String) -> Result<String, String> {
     use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW};
@@ -162,8 +238,11 @@ async fn recycle_file(path: String) -> Result<String, String> {
         if !absolute || path.chars().any(|c| c.is_control()) {
             return Err("That is not a full file path.".to_string());
         }
-        if !p.is_file() {
-            return Err("The file is no longer there. Defender may have removed it already.".to_string());
+        if !p.exists() {
+            return Err("It is no longer there: deleted already, or removed by Defender.".to_string());
+        }
+        if p.is_dir() && protected_folder(&path) {
+            return Err("Syscura does not delete this folder: it is a drive or an important Windows or user folder.".to_string());
         }
         let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).to_ascii_lowercase();
         if path.to_ascii_lowercase().starts_with(&format!("{windir}\\")) {
@@ -181,6 +260,8 @@ async fn recycle_file(path: String) -> Result<String, String> {
         if r != 0 || op.fAnyOperationsAborted.as_bool() || p.exists() {
             Err("Windows did not let Syscura move it (it may be in use, or Defender is holding it). Try \"Let Defender remove it\".".to_string())
         } else {
+            // Close the problem right away if this was its last file.
+            let _ = client::send(&Request::RecheckFiles);
             Ok("Moved to the Recycle Bin. You can restore it from there if this was a mistake.".to_string())
         }
     })
@@ -476,6 +557,7 @@ fn main() {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or(Settings { ai_model: None, ai_auto_fix: true });
             app.manage(AppState {
+                update: Mutex::new(None),
                 hardware: Mutex::new(None),
                 backup: Arc::new(Mutex::new(backup::Status::default())),
                 settings: Mutex::new(settings),
@@ -500,6 +582,11 @@ fn main() {
             set_verdict,
             processes,
             recycle_file,
+            recheck_files,
+            hw_lookup,
+            update_check,
+            update_install,
+            paths_exist,
             actions,
             apply_action,
             ai_status,

@@ -116,6 +116,37 @@ jobs:
           if (-not $ok) { throw "the service did not answer" }
           if ((Get-Service Syscura).StartType -ne 'Automatic') { throw "service does not start with Windows" }
           if (-not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\Syscura.lnk")) { throw "tray auto-start missing" }
+      - name: Install again over itself (update path) - one copy, data kept
+        shell: pwsh
+        run: |
+          $db = "$env:ProgramData\Syscura\syscura.db"
+          if (-not (Test-Path $db)) { throw "no database after the first install" }
+          $before = (Get-Item $db).Length
+          $setup = Get-ChildItem dist\*-setup.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          $ok = $false
+          foreach ($i in 1..30) { Start-Sleep 2; & "C:\Program Files\Syscura\syscura-cli.exe" status; if ($LASTEXITCODE -eq 0) { $ok = $true; break } }
+          if (-not $ok) { throw "the service did not come back after reinstalling" }
+          if ((Get-Item $db).Length -lt $before) { throw "history was lost on reinstall" }
+          $entries = @(Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+            Get-ItemProperty | Where-Object { $_.DisplayName -like 'Syscura*' })
+          "uninstall entries: $($entries.Count)"
+          if ($entries.Count -ne 1) { throw "expected exactly one installed Syscura, found $($entries.Count)" }
+          if (@(Get-Service | Where-Object Name -like 'Syscura*').Count -ne 1) { throw "more than one Syscura service" }
+      - name: An old portable copy is replaced, never doubled
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist\*-windows-x64.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName "$env:RUNNER_TEMP\portable" -Force
+          & "$env:RUNNER_TEMP\portable\syscura-agent.exe" install
+          (Get-CimInstance Win32_Service -Filter "Name='Syscura'").PathName
+          $setup = Get-ChildItem dist\*-setup.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          Start-Sleep 5
+          $path = (Get-CimInstance Win32_Service -Filter "Name='Syscura'").PathName
+          "service runs: $path"
+          if ($path -notlike '*Program Files\Syscura*') { throw "the service still points at the portable copy" }
+          if (@(Get-Service | Where-Object Name -like 'Syscura*').Count -ne 1) { throw "more than one Syscura service" }
       - name: Uninstall cleanly
         shell: pwsh
         run: |

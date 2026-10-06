@@ -29,7 +29,7 @@
 
   onMount(() => {
     load().then(() => requestAnimationFrame(() => window.scrollTo({ top: 0 })));
-    const t = setInterval(load, 4000);
+    const t = setInterval(() => { load(); checkFiles(selected); }, 4000);
     return () => clearInterval(t);
   });
 
@@ -122,15 +122,35 @@
     return [...out].slice(0, 8);
   }
 
-  let deleting = $state<{ finding: Finding; path: string } | null>(null);
+  let deleting = $state<{ finding: Finding; path: string; folder: boolean } | null>(null);
+  /** Which affected files still exist (checked every few seconds). */
+  let exists = $state<Record<string, boolean>>({});
+  async function checkFiles(f: Finding | null) {
+    if (!f) return;
+    const files = affectedFiles(f);
+    if (!files.length) return;
+    try {
+      const r = await api.pathsExist(files);
+      files.forEach((p, i) => (exists[p] = r[i]));
+      // All gone: let the agent close the problem now.
+      if (r.every((x) => !x) && (f.status === "open" || f.status === "fix_failed")) {
+        await api.recheckFiles();
+        load();
+      }
+    } catch { /* keep last */ }
+  }
+  const folderOf = (path: string) => path.replace(/\\[^\\]+$/, "");
   let fileMsg = $state<{ path: string; text: string; bad?: boolean } | null>(null);
 
   async function reveal(path: string) {
     try { await api.reveal(path); } catch (e) { fileMsg = { path, text: `Could not open the folder: ${e}`, bad: true }; }
   }
-  async function recycle(path: string) {
+  async function recycle(path: string, folder: boolean) {
     deleting = null;
-    try { fileMsg = { path, text: await api.recycleFile(path) }; } catch (e) { fileMsg = { path, text: String(e), bad: true }; }
+    const target = folder ? folderOf(path) : path;
+    try { fileMsg = { path, text: await api.recycleFile(target) }; } catch (e) { fileMsg = { path, text: String(e), bad: true }; }
+    exists[path] = false;
+    load();
   }
 
   /** The fix that solved this problem before, if it came back. */
@@ -144,6 +164,7 @@
     if (a.outcome === "nothing_found") return "found nothing wrong";
     if (a.outcome === "not_repaired") return "could not repair it";
     if (a.outcome === "unclear") return "result unclear";
+    if (a.outcome === "gone") return "the file is gone, solved";
     if (a.verified === true) return "worked";
     if (a.verified === false) return "did not hold";
     return "checking it stays fixed";
@@ -268,10 +289,15 @@
           {#each files as path}
             <div class="file">
               <span class="mono path">{path}</span>
-              <div class="row-chips">
-                <button class="btn btn--ghost btn--sm" onclick={() => reveal(path)}>Open folder</button>
-                <button class="btn btn--ghost btn--sm danger" onclick={() => (deleting = { finding: f, path })}>Delete…</button>
-              </div>
+              {#if exists[path] === false}
+                <span class="gone">✓ Gone: deleted or removed by Defender</span>
+              {:else}
+                <div class="row-chips">
+                  <button class="btn btn--ghost btn--sm" onclick={() => reveal(path)}>Open folder</button>
+                  <button class="btn btn--ghost btn--sm danger" onclick={() => (deleting = { finding: f, path, folder: false })}>Delete file…</button>
+                  <button class="btn btn--ghost btn--sm danger" onclick={() => (deleting = { finding: f, path, folder: true })}>Delete its folder…</button>
+                </div>
+              {/if}
               {#if fileMsg?.path === path}<span class="msg" class:bad={fileMsg.bad}>{fileMsg.text}</span>{/if}
             </div>
           {/each}
@@ -359,13 +385,16 @@
   {@const d = deleting}
   <div class="overlay" role="presentation" onclick={() => (deleting = null)}>
     <div class="panel dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === "Escape" && (deleting = null)}>
-      <span class="pill pill--bad" style="align-self: flex-start">Delete a file</span>
-      <span class="title-m">Move this file to the Recycle Bin?</span>
-      <p class="mono path">{d.path}</p>
-      <p class="muted">Only do this if you do not need the file. If it is part of a program you use, that program may stop working. The file goes to the Recycle Bin, so you can restore it from there. If it is an installer or archive you downloaded, deleting it is usually the right move.</p>
+      <span class="pill pill--bad" style="align-self: flex-start">{d.folder ? "Delete a whole folder" : "Delete a file"}</span>
+      <span class="title-m">{d.folder ? "Move this folder and everything in it to the Recycle Bin?" : "Move this file to the Recycle Bin?"}</span>
+      <p class="mono path">{d.folder ? folderOf(d.path) : d.path}</p>
+      <p class="muted">
+        {#if d.folder}Everything inside this folder goes, not just the infected file. Check it first with <b>Open folder</b>: if anything you need is in there, delete only the file.{:else}Only do this if you do not need the file. If it is part of a program you use, that program may stop working.{/if}
+        It goes to the Recycle Bin, so you can restore it from there. For a cracked or unofficial installer you downloaded, deleting the whole folder is usually the right move.
+      </p>
       <div class="row-chips" style="justify-content: flex-end">
         <button class="btn btn--ghost" onclick={() => (deleting = null)}>Cancel</button>
-        <button class="btn danger-solid" onclick={() => recycle(d.path)}>Move to Recycle Bin</button>
+        <button class="btn danger-solid" onclick={() => recycle(d.path, d.folder)}>Move to Recycle Bin</button>
       </div>
     </div>
   </div>
@@ -402,6 +431,7 @@
   .next { display: flex; flex-direction: column; gap: 8px; background: var(--warn-bg); font-size: 14px; }
   .fix .btn { min-width: 74px; }
   .files { display: flex; flex-direction: column; gap: 10px; }
+  .gone { color: var(--ok-ink); font-size: 14px; font-weight: 500; }
   .file { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
   .path { overflow-wrap: anywhere; font-size: 12.5px; }
   .small { font-size: 13px; }

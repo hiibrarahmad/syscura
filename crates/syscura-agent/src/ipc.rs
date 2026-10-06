@@ -233,6 +233,14 @@ fn answer(req: Request, store: &Store, engine: &Engine, shared: &Shared) -> Resp
         Request::Actions => return Response::Actions(actions::catalog()),
         Request::SetVerdict { finding, harmful, by } => return set_verdict(engine, store, finding, &harmful, &by),
         Request::Processes => return Response::Processes(shared.watch.processes()),
+        Request::RecheckFiles => {
+            let n = crate::heal::resolve_gone_files(store, None);
+            return Response::Done(match n {
+                0 => "Checked: the files are still there.".into(),
+                1 => "Checked: the file is gone, so the problem is solved.".into(),
+                n => format!("Checked: {n} problems are solved because their files are gone."),
+            });
+        }
         Request::ApplyAction { finding, title, action, params, label, automatic } => {
             return apply_action(store, shared, finding, &title, action, params, label, automatic);
         }

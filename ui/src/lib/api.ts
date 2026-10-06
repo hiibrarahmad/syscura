@@ -16,6 +16,13 @@ export const api = {
   setVerdict: (finding: number, harmful: string, by: "you" | "ai") => invoke<string>("set_verdict", { finding, harmful, by }),
   processes: () => invoke<ProcessInfo[]>("processes"),
   recycleFile: (path: string) => invoke<string>("recycle_file", { path }),
+  recheckFiles: () => invoke<string>("recheck_files"),
+  updateCheck: (force: boolean) =>
+    invoke<{ current: string; latest: string; available: boolean; notes: string; page: string; published: string }>("update_check", { force }),
+  updateInstall: () => invoke<string>("update_install"),
+  hwLookup: (device: string, fields: string[]) =>
+    invoke<{ values: Record<string, string>; note: string; sources: { title: string; url: string }[]; model: string }>("hw_lookup", { device, fields }),
+  pathsExist: (paths: string[]) => invoke<boolean[]>("paths_exist", { paths }),
   reveal: (path: string) => revealItemInDir(path),
   actions: () => invoke<ActionInfo[]>("actions"),
   applyAction: (a: { finding: number | null; title: string; action: string; params: Record<string, string>; label: string; automatic: boolean }) =>

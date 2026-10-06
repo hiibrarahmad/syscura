@@ -1,8 +1,15 @@
 # Changelog
 
-## 0.1.0-beta.3
+## 1.0.0
 
-Installs like any other Windows program, and stays with you in the tray.
+The first full release. Everything from the betas, plus a real installer, built-in updates, a live process watch and much more. Changes since 0.1.0-beta.2:
+
+### Updates
+- **Built-in updates from GitHub.** Syscura checks once a day and notifies you of a new version.
+  - *Settings → Updates → Download and install* downloads the Setup, checks its SHA-256 against the release's published checksums, and installs it.
+  - Syscura opens again afterwards, and your history, verdicts, settings and AI key are kept.
+- **Never installed twice.** Reinstalling, updating, or installing over an old portable copy always leaves exactly one Syscura and one background service. Only one copy of the app runs at a time.
+- Tested on clean machines for every change: fresh install, install over itself (history kept), replacing a portable copy, and a clean uninstall.
 
 ### Install
 - **Setup installer** (`Syscura-<version>-setup.exe`): installs to Program Files with a Start menu entry and an uninstaller in Settings → Apps.
@@ -34,6 +41,11 @@ Installs like any other Windows program, and stays with you in the tray.
 ### Remembers
 - **Mark as safe** (and *This is harmful*) is saved for good: the same thing is never flagged again. The AI's verdict is saved too, but the AI can never clear a security threat; only you can.
 - When a problem comes back after a fix that was confirmed to work, Syscura runs the same fix again automatically if it is safe, or offers **Fix again**.
+
+### Every PC, fully described
+- Details Windows does not report (common on laptops and pre-built PCs) are listed on the Hardware page. **Find them with AI** looks up the official specifications of that exact model (free Gemini key). Without a key, use **Search the web** / **Ask ChatGPT** and click **add** to type a value. Values from outside the PC are always marked *found online* or *added by you*.
+- Problems about a file (a virus, a suspicious program) are **closed automatically once the file is gone**, whether you deleted it or Defender removed it. Each file shows *Gone ✓*.
+- **Delete its folder…** removes the whole folder a threat came in, to the Recycle Bin, after a warning. Drives, Windows, Program Files and your main user folders are refused.
 
 ### Overview
 - The right panel now shows Defender's state, virus-definition age, last quick and full scan, tamper protection, today's Windows errors, PC running time, free disk space and battery.

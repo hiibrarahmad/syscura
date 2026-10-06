@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use syscura_core::findings::ActionInfo;
 
-pub use prompt::{Analysis, ProposedAction, Question, Secrets, Source};
+pub use prompt::{Analysis, ProposedAction, Question, Secrets, Source, SpecLookup};
 
 const API: &str = "https://generativelanguage.googleapis.com/v1beta";
 const MAX_REPLY: u64 = 2 * 1024 * 1024;
@@ -106,10 +106,45 @@ impl Gemini {
         q.explanation = prompt::redact(&q.explanation, &secrets);
         q.details = q.details.iter().map(|(k, v)| (k.clone(), prompt::redact(v, &secrets))).collect();
         q.system = prompt::redact(&q.system, &secrets);
+        let (reply, sources) = self.generate(model, prompt::system_instruction(), &prompt::build_prompt(&q, catalog), search)?;
+        let mut a = prompt::parse_reply(&reply, catalog)?;
+        a.model = model.to_string();
+        a.sources = sources;
+        Ok(a)
+    }
 
+    /// Looks up the official specifications of this PC (or its board) for
+    /// the details Windows does not report. Tries the free models in turn,
+    /// like `analyze_with_fallback`.
+    pub fn lookup_specs(&self, preferred: Option<&str>, device: &str, fields: &[String]) -> Result<SpecLookup, String> {
+        let mut models = prompt::model_candidates(&self.models()?);
+        if let Some(p) = preferred
+            && let Some(i) = models.iter().position(|m| m == p)
+        {
+            let m = models.remove(i);
+            models.insert(0, m);
+        }
+        let mut last = String::new();
+        for m in models.iter().take(5) {
+            match self.generate(m, prompt::SPEC_INSTRUCTION, &prompt::spec_prompt(device, fields), true) {
+                Ok((reply, sources)) => {
+                    let mut s = prompt::parse_specs(&reply, fields)?;
+                    s.model = m.clone();
+                    s.sources = sources;
+                    return Ok(s);
+                }
+                Err(e) if e.contains("free AI limit") || e.contains("(404)") || e.contains("(503)") => last = e,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(if last.is_empty() { "This key has no free Gemini Flash model available.".into() } else { last })
+    }
+
+    /// One request to Gemini: the reply text and the web pages it used.
+    fn generate(&self, model: &str, system: &str, user: &str, search: bool) -> Result<(String, Vec<Source>), String> {
         let mut body = json!({
-            "systemInstruction": { "parts": [{ "text": prompt::system_instruction() }] },
-            "contents": [{ "role": "user", "parts": [{ "text": prompt::build_prompt(&q, catalog) }] }],
+            "systemInstruction": { "parts": [{ "text": system }] },
+            "contents": [{ "role": "user", "parts": [{ "text": user }] }],
             "generationConfig": { "temperature": 0.2 }
         });
         if search {
@@ -136,9 +171,7 @@ impl Gemini {
             let reason = cand["finishReason"].as_str().unwrap_or("no answer");
             return Err(format!("The AI returned no answer ({reason})."));
         }
-        let mut a = prompt::parse_reply(&reply, catalog)?;
-        a.model = model.to_string();
-        a.sources = cand["groundingMetadata"]["groundingChunks"]
+        let sources = cand["groundingMetadata"]["groundingChunks"]
             .as_array()
             .map(|chunks| {
                 chunks
@@ -153,7 +186,7 @@ impl Gemini {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(a)
+        Ok((reply, sources))
     }
 }
 

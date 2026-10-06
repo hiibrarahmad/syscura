@@ -7,7 +7,24 @@
   import type { StatusInfo } from "../lib/types";
 
   let agent = $state<StatusInfo | null>(null);
-  onMount(() => { api.agentStatus().then((s) => (agent = s)).catch(() => {}); });
+  type Update = Awaited<ReturnType<typeof api.updateCheck>>;
+  let upd = $state<Update | null>(null);
+  let updMsg = $state<{ text: string; bad?: boolean } | null>(null);
+  let updBusy = $state(false);
+  async function checkUpdate(force: boolean) {
+    updBusy = true;
+    updMsg = null;
+    try { upd = await api.updateCheck(force); } catch (e) { updMsg = { text: String(e), bad: true }; } finally { updBusy = false; }
+  }
+  async function installUpdate() {
+    updBusy = true;
+    updMsg = { text: "Downloading the update and checking it…" };
+    try { updMsg = { text: await api.updateInstall() }; } catch (e) { updMsg = { text: String(e), bad: true }; updBusy = false; }
+  }
+  onMount(() => {
+    api.agentStatus().then((s) => (agent = s)).catch(() => {});
+    checkUpdate(false);
+  });
 
   let key = $state("");
   let busy = $state(false);
@@ -96,6 +113,25 @@
       <p><b>Off.</b> Open the Overview page and press <b>Start</b>.</p>
     {/if}
     <p class="muted">Closing the window keeps Syscura in the taskbar tray (the ^ arrow next to the clock). Right-click its icon for <b>Quit</b>. Background protection keeps running either way.</p>
+  </section>
+
+  <section class="panel">
+    <span class="kicker">Updates</span>
+    {#if upd?.available}
+      <p><b>Syscura {upd.latest} is available.</b> You have {upd.current}.{upd.published ? ` Released ${upd.published}.` : ""}</p>
+      <p class="muted">Syscura downloads it from GitHub, checks it against the published checksum, and installs it over this copy (one admin prompt). Your history, verdicts, settings and AI key are kept, and Syscura opens again when it is done.</p>
+      <div class="btns">
+        <button class="btn btn--sm" disabled={updBusy} onclick={installUpdate}>{updBusy ? "Working…" : `Download and install ${upd.latest}`}</button>
+        <button class="btn btn--ghost btn--sm" onclick={() => api.open(upd!.page)}>What's new</button>
+      </div>
+    {:else if upd}
+      <p><b>You have the latest version</b> ({upd.current}).</p>
+      <p class="muted">Syscura checks GitHub once a day and tells you when there is a new version.</p>
+      <div class="btns"><button class="btn btn--ghost btn--sm" disabled={updBusy} onclick={() => checkUpdate(true)}>{updBusy ? "Checking…" : "Check now"}</button></div>
+    {:else}
+      <div class="btns"><button class="btn btn--ghost btn--sm" disabled={updBusy} onclick={() => checkUpdate(true)}>{updBusy ? "Checking…" : "Check for updates"}</button></div>
+    {/if}
+    {#if updMsg}<p class:bad={updMsg.bad} class="msg">{updMsg.text}</p>{/if}
   </section>
 
   <section class="panel">

@@ -83,8 +83,32 @@ fn needs_attention(f: &Finding) -> bool {
         && !(f.harmful == Harm::No && (f.severity == Level::Info || f.verdict_by == "you"))
 }
 
+/// Once a day: is there a newer Syscura on GitHub? Notifies once per
+/// version; installing happens from Settings (or the notification's app).
+fn check_for_update(app: &AppHandle, marker: &Option<PathBuf>) {
+    let Ok(info) = tauri::async_runtime::block_on(crate::update_info(app, true)) else { return };
+    if !info.available {
+        return;
+    }
+    let told = marker.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    if told.trim() == info.latest {
+        return;
+    }
+    let _ = app
+        .notification()
+        .builder()
+        .title(format!("Syscura {} is available", info.latest))
+        .body("Open Syscura → Settings → Updates to install it. Your history and settings are kept.")
+        .show();
+    if let Some(p) = marker {
+        let _ = std::fs::write(p, &info.latest);
+    }
+}
+
 fn start_watcher(app: AppHandle) {
     let seen_path: Option<PathBuf> = app.path().app_local_data_dir().ok().map(|d| d.join("notified.json"));
+    let update_marker: Option<PathBuf> = app.path().app_local_data_dir().ok().map(|d| d.join("update-notified.txt"));
+    let mut last_update_check: Option<std::time::Instant> = None;
     let _ = std::thread::Builder::new().name("tray-watch".into()).spawn(move || {
         let mut seen: BTreeMap<i64, u64> = seen_path
             .as_ref()
@@ -120,6 +144,15 @@ fn start_watcher(app: AppHandle) {
             };
             if let Some(tray) = app.tray_by_id(TRAY_ID) {
                 let _ = tray.set_tooltip(Some(tooltip));
+            }
+            // First check a few minutes after start, then daily.
+            let due = match last_update_check {
+                None => true,
+                Some(t) => t.elapsed() >= Duration::from_secs(24 * 3600),
+            };
+            if due {
+                last_update_check = Some(std::time::Instant::now());
+                check_for_update(&app, &update_marker);
             }
             std::thread::sleep(Duration::from_secs(30));
         }

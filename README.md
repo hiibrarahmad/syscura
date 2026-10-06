@@ -17,7 +17,7 @@ Free. Open source. No account, no ads, no telemetry, nothing to pay for.
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078d4?logo=windows)
 ![Rust](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-dea584?logo=rust)
 
-[**Download the beta**](https://github.com/hiibrarahmad/syscura/releases/latest) · [What it finds](#what-it-finds) · [Free AI help](#free-ai-help-no-key-needed) · [How fixes stay safe](#how-fixes-stay-safe) · [Build from source](#build-from-source)
+[**Download Syscura**](https://github.com/hiibrarahmad/syscura/releases/latest) · [What it finds](#what-it-finds) · [Free AI help](#free-ai-help-no-key-needed) · [How fixes stay safe](#how-fixes-stay-safe) · [Build from source](#build-from-source)
 
 </div>
 
@@ -39,6 +39,7 @@ Windows logs thousands of warnings. Most are noise, a few really matter, and alm
 | ✦ **Free AI help, no key needed** | One click opens **ChatGPT, Claude, Copilot, Gemini or Google AI Mode** in your browser with the problem already written out (private details removed). Or add a free Gemini key and Syscura searches the web, explains, and picks fixes from its safe list. |
 | 🕵️ **Catches what antivirus misses** | A light **live process watch** flags fake Windows processes (an `svchost.exe` outside System32), unsigned programs running from Temp, Downloads or AppData, and Office or PDF readers starting PowerShell. A scan of **everything that starts with Windows** (Run keys, Startup folders, scheduled tasks) flags unsigned programs and hidden or downloading scripts. Brand-new malware has no signature yet, but it still has to run and stay running. |
 | 🗂️ **Every process, live** | The **Processes** page lists every running program with CPU, memory, folder, publisher and signature, and marks anything suspicious. Open its folder, scan it with Defender, or stop it (asks first). |
+| 🔄 **Updates itself, safely** | Finds new releases on GitHub, verifies the download's checksum before running it, and keeps all your data. Installing again or over an old portable copy never creates a second Syscura. |
 | 🧠 **Remembers** | Press **Mark as safe** once and Syscura never warns about that thing again. If a problem returns after a fix that worked, Syscura applies the same fix again. |
 | 🛡️ **Warns you and protects your files** | Serious problems (virus found, failing drive, repeated blue screens) show a red banner and a Windows notification, with a **Back up my files now** button that copies your folders to another drive. |
 | 🔬 **Accurate hardware, any PC** | Read fresh at every start from Windows itself: exact Windows 11 version and build, board and BIOS, CPU, every RAM stick's part number, GPU, drives with health and wear, monitors, battery wear, network, USB. Anything your PC doesn't report says *Not reported*. No guessing. |
@@ -50,20 +51,20 @@ Windows logs thousands of warnings. Most are noise, a few really matter, and alm
 
 ## Download
 
-> [!NOTE]
-> Syscura is in **public beta**. It works well on the machines it was tested on, but it is young. Please [report anything odd](https://github.com/hiibrarahmad/syscura/issues/new/choose); it really helps.
+> [!TIP]
+> Something odd on your PC, or a detail Syscura gets wrong? Please [report it](https://github.com/hiibrarahmad/syscura/issues/new/choose); every report makes Syscura better for people with the same hardware.
 
 ### Install (recommended)
 
 1. Download **`Syscura-<version>-setup.exe`** from [**Releases**](https://github.com/hiibrarahmad/syscura/releases/latest).
-2. Double-click it. Windows SmartScreen will warn you the first time, because the beta is not code-signed yet (certificates cost money; free signing for open-source projects is planned). Click **More info → Run anyway**, then **Yes** on the admin prompt.
+2. Double-click it. Windows SmartScreen will warn you the first time, because Syscura is not code-signed yet (certificates cost money; free signing for open-source projects is planned). Click **More info → Run anyway**, then **Yes** on the admin prompt.
 3. Click **Next → Install → Finish**. That's it:
    - Syscura is installed in `C:\Program Files\Syscura`, with a Start menu entry and an uninstaller in *Settings → Apps*.
    - **Background protection is set up as a Windows service** and starts with Windows, before anyone signs in.
    - **The Syscura icon sits in the taskbar tray** (the **^** next to the clock) after every restart. Click it to open Syscura, right-click for the menu. Closing the window keeps it there.
    - Serious problems pop up as Windows notifications, even when the window is closed.
 
-To update, run the newer setup over the old one; your history is kept. To remove Syscura, use *Settings → Apps → Syscura → Uninstall*: the service and auto-start are removed too. (Your history in `C:\ProgramData\Syscura` is kept; delete that folder for a clean slate.)
+**Updates are built in.** Syscura checks GitHub once a day and tells you when a new version is out. *Settings → Updates → Download and install* fetches it, checks it against the published SHA-256 checksum, installs it over your copy and opens Syscura again. Your history, "marked safe" verdicts, settings and AI key are kept. Running a newer Setup by hand works too. To remove Syscura, use *Settings → Apps → Syscura → Uninstall*: the service and auto-start are removed too. (Your history in `C:\ProgramData\Syscura` is kept; delete that folder for a clean slate.)
 
 ### Portable (no install)
 

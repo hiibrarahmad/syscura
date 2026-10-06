@@ -15,6 +15,7 @@ mod log;
 mod meminfo;
 mod service;
 mod trust;
+mod watch;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -49,6 +50,10 @@ fn main() -> ExitCode {
         }
         Some("service") => service::dispatch(),
         Some("install") => service::install(),
+        Some("selftest") => {
+            watch::self_test();
+            Ok(())
+        }
         Some("uninstall") => service::uninstall(),
         _ => return usage(""),
     };

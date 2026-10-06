@@ -371,6 +371,16 @@ risk = "safe"
 action = "defender.full_scan"
 label = "Run a Defender full scan (takes a while)"
 risk = "caution"
+[[rule.fix]]
+action = "defender.remove_threats"
+label = "Let Defender remove the threats it found"
+risk = "caution"
+auto = false
+[[rule.fix]]
+action = "defender.offline_scan"
+label = "Defender Offline scan (restarts the PC, finds hidden malware)"
+risk = "risky"
+auto = false
 
 [[rule]]
 id = "sec.defender_off"
@@ -486,3 +496,124 @@ search = "DistributedCOM 10016 safe to ignore"
 channel = "System"
 provider = "DistributedCOM"
 event_ids = [10010, 10016]
+
+# ---------------------------------------------------------------------------
+# Syscura's own checks (crates/syscura-agent/src/watch.rs). These catch what
+# signature-based antivirus can miss: brand-new malware still has to run
+# from somewhere and keep itself starting with Windows.
+
+[[rule]]
+id = "proc.fake_system"
+title = "A program pretends to be part of Windows"
+category = "security"
+severity = "critical"
+harmful = "yes"
+group_by = "Path"
+explain = "A program called \"{Name}\" is running from {Path}. The real {Name} only runs from the Windows folder, so this is very likely malware disguised as part of Windows."
+advice = "Do not ignore this. Scan the file with Defender, stop the program, then run a Defender Offline scan. Open its folder to see what else is there."
+search = "{Name} running from wrong folder malware"
+[rule.match]
+channel = "Syscura/Processes"
+event_ids = [1]
+[[rule.fix]]
+action = "defender.scan_path"
+label = "Scan this file with Defender"
+risk = "safe"
+params = { path = "{Path}" }
+[[rule.fix]]
+action = "process.stop"
+label = "Stop this program"
+risk = "caution"
+auto = false
+params = { pid = "{Pid}", name = "{Name}" }
+[[rule.fix]]
+action = "defender.offline_scan"
+label = "Defender Offline scan (restarts the PC, finds hidden malware)"
+risk = "risky"
+auto = false
+
+[[rule]]
+id = "proc.unsigned_user"
+title = "An unsigned program runs from a user folder"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "Path"
+explain = "\"{Name}\" is running from {Path} and has no valid digital signature ({Signature}). Many small tools and games do this, but it is also how most malware runs."
+advice = "If you installed this program yourself and trust it, press Mark as safe and Syscura will not warn about it again. Otherwise scan it with Defender."
+search = "{Name} is it safe"
+[rule.match]
+channel = "Syscura/Processes"
+event_ids = [2]
+[[rule.fix]]
+action = "defender.scan_path"
+label = "Scan this file with Defender"
+risk = "safe"
+params = { path = "{Path}" }
+[[rule.fix]]
+action = "process.stop"
+label = "Stop this program"
+risk = "caution"
+auto = false
+params = { pid = "{Pid}", name = "{Name}" }
+
+[[rule]]
+id = "proc.document_shell"
+title = "A document program started a command shell"
+category = "security"
+severity = "error"
+harmful = "yes"
+group_by = "Parent"
+explain = "{Parent} started {Name} ({Path}). Documents should never start command shells; this is a common way malicious documents and e-mail attachments install malware."
+advice = "Close the document you just opened and do not enable macros or editing. Run a Defender full scan. If you did not expect this, stop the program."
+search = "{Parent} launched {Name} malicious document"
+[rule.match]
+channel = "Syscura/Processes"
+event_ids = [3]
+[[rule.fix]]
+action = "process.stop"
+label = "Stop {Name}"
+risk = "caution"
+auto = false
+params = { pid = "{Pid}", name = "{Name}" }
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+[[rule]]
+id = "sec.startup_unsigned"
+title = "An unsigned program starts with Windows"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "Path"
+explain = "\"{Name}\" starts with Windows ({Where}) from {Path}, a user folder, and it has no valid digital signature ({Signature}). Most malware keeps itself running this way."
+advice = "If you recognise it, press Mark as safe. If not, scan it with Defender and turn it off: Task Manager → Startup apps for Run keys and Startup folders, Task Scheduler for scheduled tasks."
+search = "{Name} startup program is it safe"
+[rule.match]
+channel = "Syscura/Startup"
+event_ids = [10]
+[[rule.fix]]
+action = "defender.scan_path"
+label = "Scan this file with Defender"
+risk = "safe"
+params = { path = "{Path}" }
+
+[[rule]]
+id = "sec.startup_script"
+title = "A hidden or downloading script starts with Windows"
+category = "security"
+severity = "error"
+harmful = "maybe"
+group_by = "Command"
+explain = "A {Where} called \"{Name}\" runs a script with \"{Flag}\": {Command}. Hidden, encoded or downloading scripts at startup are a classic sign of malware, although some admin tools use them too."
+advice = "If you do not know this item, turn it off (Task Scheduler for tasks, Task Manager → Startup apps otherwise) and run a Defender full scan."
+search = "scheduled task powershell hidden encoded startup malware"
+[rule.match]
+channel = "Syscura/Startup"
+event_ids = [11]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"

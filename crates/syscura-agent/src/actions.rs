@@ -73,6 +73,10 @@ pub fn judge(action: &str, output: &str) -> (Effect, Option<&'static str>) {
         "dism.restore_health" if o.contains("restore operation completed successfully") => {
             (Effect::Fixed, Some("DISM finished: the Windows image is repaired and healthy."))
         }
+        "defender.scan_path" if o.contains("found no threats") => {
+            (Effect::NothingFound, Some("Defender scanned it and found no threats."))
+        }
+        "defender.scan_path" if o.contains("threats") => (Effect::Fixed, Some("Defender found threats there and removed them.")),
         "chkdsk.scan" if o.contains("found no problems") => {
             (Effect::NothingFound, Some("Drive C: has no file system errors (checked read-only)."))
         }
@@ -110,6 +114,10 @@ const CATALOG: &[Entry] = &[
     ("print.clear_queue", "Clear stuck print jobs", "Stops the print spooler, moves stuck jobs to Syscura's quarantine (not deleted, can be undone) and starts the spooler again.", Risk::Caution, &[], true),
     ("defender.quick_scan", "Defender quick scan", "Runs a Microsoft Defender quick scan.", Risk::Safe, &[], false),
     ("defender.full_scan", "Defender full scan", "Runs a Microsoft Defender full scan (can take an hour or more).", Risk::Caution, &[], false),
+    ("defender.scan_path", "Scan this file or folder with Defender", "Runs a Microsoft Defender scan of one file or folder (and removes threats it finds there). Param path = full path.", Risk::Safe, &["path"], false),
+    ("defender.remove_threats", "Let Defender remove the threats it found", "Asks Microsoft Defender to remove or quarantine every active threat it has detected (Remove-MpThreat). Defender keeps quarantined files, so they can be restored from Windows Security.", Risk::Caution, &[], false),
+    ("defender.offline_scan", "Defender Offline scan (restarts the PC)", "Restarts the PC into Microsoft Defender Offline, which finds malware that hides while Windows runs. Takes about 15 minutes; save your work first.", Risk::Risky, &[], false),
+    ("process.stop", "Stop this program", "Ends one running program (by process id and name). Unsaved work in it is lost. Windows' own critical processes are never stopped. Params pid, name.", Risk::Caution, &["pid", "name"], false),
     ("defender.update", "Update Defender", "Updates Microsoft Defender's virus definitions.", Risk::Safe, &[], false),
     ("defender.enable_realtime", "Turn real-time protection on", "Turns Microsoft Defender real-time protection back on.", Risk::Caution, &[], false),
     ("sfc.scan", "Repair system files (SFC)", "Runs System File Checker (sfc /scannow) to find and repair damaged Windows files. Takes 10-30 minutes.", Risk::Caution, &[], false),
@@ -148,6 +156,21 @@ pub fn validate(action: &str, params: &BTreeMap<String, String>) -> Result<(), S
         valid_service_name(s)?;
     } else if entry.4.contains(&"service") {
         return Err("A service name is needed.".into());
+    }
+    for k in entry.4 {
+        let v = params.get(*k).ok_or_else(|| format!("\"{action}\" needs a \"{k}\" setting."))?;
+        match *k {
+            "path" => {
+                valid_path(v)?;
+            }
+            "pid" => {
+                v.parse::<u32>().map_err(|_| "not a valid process id".to_string())?;
+            }
+            "name" => {
+                valid_exe_name(v)?;
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -188,6 +211,20 @@ pub fn run(action: &str, p: &BTreeMap<String, String>) -> Result<Outcome, String
         "defender.quick_scan" => tool(&defender()?, &["-Scan", "-ScanType", "1"], 3600).map(done),
         "defender.full_scan" => tool(&defender()?, &["-Scan", "-ScanType", "2"], 6 * 3600).map(done),
         "defender.update" => tool(&defender()?, &["-SignatureUpdate"], 900).map(done),
+        "defender.scan_path" => {
+            let path = valid_path(p.get("path").map(String::as_str).unwrap_or(""))?;
+            // The path is one argument of its own: no shell is involved.
+            judged(action, tool_full(&defender()?, &["-Scan", "-ScanType", "3", "-File", path], 6 * 3600))
+        }
+        "defender.remove_threats" => powershell("Remove-MpThreat").map(|m| {
+            done(if m.trim().is_empty() { "Defender removed or quarantined the threats it had found.".into() } else { m })
+        }),
+        "defender.offline_scan" => powershell("Start-MpWDOScan")
+            .map(|_| done("The PC restarts into Defender Offline within a minute. It takes about 15 minutes, then Windows starts again.".into())),
+        "process.stop" => stop_process(
+            p.get("pid").and_then(|v| v.parse().ok()).ok_or("missing process id")?,
+            valid_exe_name(p.get("name").map(String::as_str).unwrap_or(""))?,
+        ),
         "defender.enable_realtime" => powershell("Set-MpPreference -DisableRealtimeMonitoring $false").map(done),
         "sfc.scan" => judged(action, tool_full(&system32("sfc.exe"), &["/scannow"], 3 * 3600)),
         "dism.restore_health" => {
@@ -262,6 +299,66 @@ pub fn probe(name: &str, p: &BTreeMap<String, String>) -> Result<bool, String> {
             }
         }
         other => Err(format!("unknown check \"{other}\"")),
+    }
+}
+
+// ------------------------------------------------------------- files and programs
+
+/// A full path to an existing file or folder, from untrusted input.
+fn valid_path(s: &str) -> Result<&str, String> {
+    let b = s.as_bytes();
+    let absolute = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+    if !absolute || s.len() > 1024 || s.chars().any(|c| c.is_control() || c == '"' || c == '|') {
+        return Err("not a valid full path".into());
+    }
+    if !std::path::Path::new(s).exists() {
+        return Err(format!("{s} no longer exists."));
+    }
+    Ok(s)
+}
+
+fn valid_exe_name(s: &str) -> Result<&str, String> {
+    let ok = !s.is_empty() && s.len() <= 260 && !s.chars().any(|c| c.is_control() || matches!(c, '\\' | '/' | '"' | ':'));
+    if ok { Ok(s) } else { Err("not a valid program name".into()) }
+}
+
+/// Windows cannot run without these; stopping them crashes the PC.
+const CRITICAL: &[&str] = &["csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "smss.exe", "system", "svchost.exe", "dwm.exe"];
+
+fn stop_process(pid: u32, name: &str) -> Result<Outcome, String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+        TerminateProcess,
+    };
+    if pid <= 4 {
+        return Err("That is part of Windows itself.".into());
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .map_err(|_| format!("{name} is not running any more (or Windows protects it)."))?;
+        let mut buf = vec![0u16; 1024];
+        let mut len = buf.len() as u32;
+        let path = if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok() {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            String::new()
+        };
+        let file = std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        // The id may have been reused by another program since the warning.
+        if !file.eq_ignore_ascii_case(name) {
+            let _ = CloseHandle(h);
+            return Err(format!("{name} is not running any more."));
+        }
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).to_ascii_lowercase();
+        if CRITICAL.contains(&file.to_ascii_lowercase().as_str()) && path.to_ascii_lowercase().starts_with(&windir) {
+            let _ = CloseHandle(h);
+            return Err(format!("{name} is the real Windows program; Syscura does not stop it."));
+        }
+        let r = TerminateProcess(h, 1);
+        let _ = CloseHandle(h);
+        r.map_err(|e| format!("could not stop {name}: {e}"))?;
+        Ok(done(format!("Stopped {name} (process {pid}). Its file was not touched: scan or delete it next.")))
     }
 }
 

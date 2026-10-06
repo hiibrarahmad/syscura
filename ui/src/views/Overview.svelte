@@ -2,8 +2,8 @@
   import { ai } from "../lib/ai.svelte";
   import { needsAttention } from "../lib/findings";
   import { nav } from "../lib/nav.svelte";
-  import { api, ago, duration, gb, mb } from "../lib/api";
-  import { LINKS } from "../lib/links";
+  import { api, ago, driveSize, duration, gb, mb } from "../lib/api";
+  import SocialLinks from "../lib/SocialLinks.svelte";
   import type { Finding, HardwareInfo, Sensor, StatusInfo } from "../lib/types";
 
   let {
@@ -68,6 +68,15 @@
     const n = hw.disks.length;
     return n === 1 ? "Healthy" : n === 2 ? "Both healthy" : `All ${n} healthy`;
   });
+
+  const systemDrive = $derived(hw?.volumes.filter((v) => !v.removable && v.size_bytes > 0).slice(0, 2) ?? []);
+  function when(iso: string): string {
+    if (!iso) return "Never";
+    const t = new Date(iso).getTime();
+    if (!t) return "Never";
+    const days = Math.floor((Date.now() - t) / 86_400_000);
+    return days <= 0 ? `Today, ${new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}` : days === 1 ? "Yesterday" : `${days} days ago`;
+  }
 
   function openProblem(id: number) {
     nav.problem = id;
@@ -165,8 +174,40 @@
         {:else if gpuLoad?.value != null}<span class="big-num">{Math.round(gpuLoad.value)}<small>%</small></span>
         {:else}<span class="big-num">—</span>{/if}
       </div>
-      <div class="metric"><span>Memory</span><span class="big-num">{ram ? gb(ram).replace(" GB", "") : "—"}<small> GB installed</small></span></div>
+      <div class="metric"><span>Memory</span><span class="big-num">{ram ? gb(ram).replace(" GB", "") : "—"}<small>GB installed</small></span></div>
       <div class="metric"><span>Drives</span><span class="big-num" style="font-size: 30px; letter-spacing: -0.03em">{drives}</span></div>
+    </div>
+
+    <div class="block">
+      <span class="bhead">Protection</span>
+      {#if status?.defender}
+        {@const d = status.defender}
+        <div class="line"><span class="muted">Microsoft Defender</span><b>{d.antivirus && d.realtime ? "On, watching files" : d.antivirus ? "On, but real-time is OFF" : "Off"}</b></div>
+        <div class="line"><span class="muted">Virus definitions</span><b>{d.signature_age_days <= 0 ? "Up to date (today)" : d.signature_age_days === 1 ? "1 day old" : `${d.signature_age_days} days old`}</b></div>
+        <div class="line"><span class="muted">Last quick scan</span><b>{when(d.last_quick_scan)}</b></div>
+        <div class="line"><span class="muted">Last full scan</span><b>{d.last_full_scan ? when(d.last_full_scan) : "Never. Worth running once"}</b></div>
+        <div class="line"><span class="muted">Tamper protection</span><b>{d.tamper_protected ? "On" : "Off"}</b></div>
+      {:else if status}
+        <div class="line"><span class="muted">Microsoft Defender</span><b>Checking…</b></div>
+      {:else}
+        <div class="line"><span class="muted">Background protection</span><b>Off</b></div>
+      {/if}
+      {#if status}
+        <div class="line"><span class="muted">Syscura</span><b>{status.service ? "Windows service" : "This session"} · {mb(status.working_set_bytes)}</b></div>
+      {/if}
+    </div>
+
+    <div class="block">
+      <span class="bhead">Today</span>
+      {#if status}
+        <div class="line"><span class="muted">Windows events (24 h)</span><b>{(status.last_24h.critical + status.last_24h.error).toLocaleString()} errors · {status.last_24h.warning.toLocaleString()} warnings</b></div>
+      {/if}
+      {#if hw?.os.last_boot_ms}<div class="line"><span class="muted">PC running for</span><b>{duration(Math.floor((Date.now() - hw.os.last_boot_ms) / 1000))}</b></div>{/if}
+      {#each systemDrive as v}
+        <div class="line"><span class="muted">Free on {v.letter}</span><b>{driveSize(v.free_bytes)} of {driveSize(v.size_bytes)} ({Math.round((v.free_bytes / v.size_bytes) * 100)} %)</b></div>
+      {/each}
+      {#if hw?.battery.length}<div class="line"><span class="muted">Battery</span><b>{hw.battery[0].charge_pct ?? "?"} %{hw.battery[0].wear_pct != null ? ` · ${hw.battery[0].wear_pct} % worn` : ""}</b></div>{/if}
+      <div class="line"><span class="muted">Fixed by Syscura</span><b>{fixed.length} problem{fixed.length === 1 ? "" : "s"}</b></div>
     </div>
     {#if hw}
       <button class="pc" onclick={onhardware}>
@@ -194,12 +235,16 @@
       <button class="link" onclick={onsettings}>Set up free AI help</button>
     {/if}
     {#if status && !status.service}<button class="link" disabled={agentBusy} onclick={() => agentAction(api.installService)}>Install as a Windows service</button>{/if}
-    <button class="link" onclick={() => api.open(LINKS.repo)}>GitHub</button>
+    <SocialLinks compact />
   </span>
 </footer>
 
 <style>
   .task p { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .block { display: flex; flex-direction: column; gap: 2px; }
+  .bhead { font-size: 13px; font-weight: 600; color: var(--on-brand-faint); letter-spacing: 0.02em; margin-bottom: 4px; }
+  .line { display: flex; justify-content: space-between; gap: 16px; padding: 7px 0; border-top: 1px solid var(--on-brand-line); font-size: 14px; }
+  .line b { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
   .pc { margin-top: auto; display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; text-align: left; background: none; border: 0; border-radius: 0; padding: 0; color: inherit; }
   .pc b { font-weight: 600; }
   .pc:hover { border: 0; }

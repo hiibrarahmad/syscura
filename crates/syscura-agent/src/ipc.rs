@@ -231,6 +231,8 @@ fn answer(req: Request, store: &Store, engine: &Engine, shared: &Shared) -> Resp
             .set_finding_status(finding, if ignore { FindingStatus::Ignored } else { FindingStatus::Open })
             .map(|_| Response::Done(if ignore { "Ignored." } else { "No longer ignored." }.into())),
         Request::Actions => return Response::Actions(actions::catalog()),
+        Request::SetVerdict { finding, harmful, by } => return set_verdict(engine, store, finding, &harmful, &by),
+        Request::Processes => return Response::Processes(shared.watch.processes()),
         Request::ApplyAction { finding, title, action, params, label, automatic } => {
             return apply_action(store, shared, finding, &title, action, params, label, automatic);
         }
@@ -282,6 +284,7 @@ fn apply_action(
                     syscura_store::Recorded::New(id)
                     | syscura_store::Recorded::Repeat(id)
                     | syscura_store::Recorded::Returned(id)
+                    | syscura_store::Recorded::CameBack(id)
                     | syscura_store::Recorded::Ignored(id) => id,
                 },
                 Err(e) => return Response::Error(format!("store error: {e}")),
@@ -333,6 +336,7 @@ fn finding_view(engine: &Engine, store: &Store, r: syscura_store::FindingRow) ->
             attempts: store.attempts(r.id).unwrap_or_default(),
             evidence: Default::default(),
             search: format!("Windows {}", r.group),
+            verdict_by: r.verdict_by.clone(),
         });
     }
     let rule = engine.rule(&r.rule_id)?;
@@ -341,12 +345,18 @@ fn finding_view(engine: &Engine, store: &Store, r: syscura_store::FindingRow) ->
     if rule.enrich.as_deref() == Some("bugcheck") && !r.evidence.contains_key("StopName") {
         crate::trust::enrich("bugcheck", &mut r.evidence);
     }
-    // Checks run on the evidence may raise or lower the rule's defaults.
-    let harmful = match r.evidence.get("_harmful").map(String::as_str) {
+    // A remembered verdict (yours or the AI's) wins; then checks run on
+    // the evidence may raise or lower the rule's defaults.
+    let harmful = match r.verdict.as_str() {
+        "yes" => Harm::Yes,
+        "no" => Harm::No,
+        "maybe" => Harm::Maybe,
+        _ => match r.evidence.get("_harmful").map(String::as_str) {
         Some("yes") => Harm::Yes,
         Some("no") => Harm::No,
         Some("maybe") => Harm::Maybe,
         _ => rule.harmful,
+        },
     };
     let severity = r
         .evidence
@@ -388,7 +398,42 @@ fn finding_view(engine: &Engine, store: &Store, r: syscura_store::FindingRow) ->
             render(&rule.search, &r.evidence, r.count).replace(" ?", "")
         },
         evidence: r.evidence.into_iter().filter(|(k, _)| !k.starts_with('_')).collect(),
+        verdict_by: r.verdict_by,
     })
+}
+
+/// Remembers a harm verdict. The person can say anything; the AI may not
+/// clear a security problem the rule rates as harmful (a wrong "it's fine"
+/// about real malware would be worse than a false alarm).
+fn set_verdict(engine: &Engine, store: &Store, finding: i64, harmful: &str, by: &str) -> Response {
+    if !matches!(harmful, "" | "no" | "maybe" | "yes") || !matches!(by, "you" | "ai") {
+        return Response::Error("bad verdict".into());
+    }
+    let row = match store.finding(finding) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Response::Error("No such problem.".into()),
+        Err(e) => return Response::Error(format!("store error: {e}")),
+    };
+    if by == "ai" {
+        // The person's own verdict is never overwritten by the AI.
+        if row.verdict_by == "you" {
+            return Response::Done("Kept your own verdict.".into());
+        }
+        let protected = engine
+            .rule(&row.rule_id)
+            .is_some_and(|r| r.category == "security" && r.harmful == Harm::Yes);
+        if protected && harmful != "yes" {
+            return Response::Done("Security threats are only cleared by you.".into());
+        }
+    }
+    match store.set_verdict(finding, harmful, by) {
+        Ok(()) => Response::Done(match (harmful, by) {
+            ("", _) => "Forgot the verdict.".into(),
+            ("no", "you") => "Marked as safe. Syscura will not warn about this again.".into(),
+            _ => "Saved.".into(),
+        }),
+        Err(e) => Response::Error(format!("store error: {e}")),
+    }
 }
 
 fn status(store: &Store, shared: &Shared) -> syscura_store::Result<StatusInfo> {
@@ -397,6 +442,7 @@ fn status(store: &Store, shared: &Shared) -> syscura_store::Result<StatusInfo> {
         version: env!("CARGO_PKG_VERSION").into(),
         pid: std::process::id(),
         service: !shared.console,
+        defender: shared.watch.defender(),
         uptime_secs: shared.started.elapsed().as_secs(),
         working_set_bytes,
         private_bytes,

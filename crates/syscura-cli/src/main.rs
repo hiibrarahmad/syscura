@@ -7,6 +7,7 @@
 //!   syscura-cli fix <problem> <fix>         run a fix (numbers from `problems`)
 //!   syscura-cli undo <attempt>              undo a fix that can be undone
 //!   syscura-cli ignore <problem>            stop showing a problem
+//!   syscura-cli processes [--warn] [--json] running programs (warnings only)
 
 use std::process::ExitCode;
 
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
         }
         Some("hw") => Request::Hardware { refresh: args.iter().any(|a| a == "--refresh") },
         Some("actions") => Request::Actions,
+        Some("processes") => Request::Processes,
         Some("problems") => Request::Findings { include_closed: args.iter().any(|a| a == "--all") },
         Some(cmd @ ("fix" | "undo" | "ignore")) => {
             let num = |i: usize| args.get(i).and_then(|n| n.parse::<i64>().ok());
@@ -65,6 +67,16 @@ fn main() -> ExitCode {
         Response::Hardware(hw) => print_hardware(&hw),
         Response::Findings(f) => print_findings(&f),
         Response::Done(msg) => println!("{msg}"),
+        Response::Processes(list) => {
+            let only_warnings = args.iter().any(|a| a == "--warn");
+            println!("{:>7}  {:<28} {:>9} {:>6}  {:<10} PATH", "PID", "NAME", "MEMORY", "CPU", "SIGNATURE");
+            for p in list.iter().filter(|p| !only_warnings || !p.warning.is_empty()) {
+                println!("{:>7}  {:<28} {:>9} {:>5.1}%  {:<10} {}", p.pid, p.name, mb(p.memory_bytes), p.cpu_pct, p.signature, p.path);
+                if !p.warning.is_empty() {
+                    println!("         ! {}", p.warning);
+                }
+            }
+        }
         Response::Actions(list) => {
             for a in list {
                 println!("{:<26} {:?}  {}", a.id, a.risk, a.description);
@@ -87,6 +99,7 @@ fn usage(problem: &str) -> ExitCode {
        syscura-cli events [-n N] [--errors] [--json]
        syscura-cli hw [--refresh] [--json]
        syscura-cli problems [--all] [--json]
+       syscura-cli processes [--warn] [--json]
        syscura-cli fix <problem> <fix> | undo <attempt> | ignore <problem>"
     );
     ExitCode::from(2)

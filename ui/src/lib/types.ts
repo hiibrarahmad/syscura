@@ -4,10 +4,22 @@ export type Level = "critical" | "error" | "warning" | "info" | "verbose";
 
 export interface LevelCounts { critical: number; error: number; warning: number; other: number }
 
+export interface DefenderInfo {
+  antivirus: boolean; realtime: boolean; tamper_protected: boolean; signature_age_days: number;
+  signatures_updated: string; last_quick_scan: string; last_full_scan: string; checked_ms: number;
+}
+export interface ProcessInfo {
+  pid: number; parent: number; parent_name: string; name: string; path: string; started_ms: number;
+  memory_bytes: number; cpu_pct: number; threads: number;
+  signature: "valid" | "unsigned" | "invalid" | "unknown" | ""; signer: string;
+  location: "system" | "program_files" | "user" | "other"; warning: string;
+}
+
 export interface StatusInfo {
   version: string;
   pid: number;
   service: boolean;
+  defender: DefenderInfo | null;
   uptime_secs: number;
   working_set_bytes: number;
   private_bytes: number;
@@ -92,6 +104,8 @@ export interface Finding {
   id: number; rule_id: string; group: string; title: string; category: string; severity: Level; harmful: Harm;
   explanation: string; advice: string; message: string; first_ts: number; last_ts: number; count: number; status: FindingStatus;
   evidence: Record<string, string>; fixes: FixOption[]; attempts: FixAttempt[]; search: string;
+  /** Who set `harmful` when it is not the rule's default: "you" or "ai". */
+  verdict_by: string;
 }
 
 export interface BackupFolder { id: string; name: string; path: string }

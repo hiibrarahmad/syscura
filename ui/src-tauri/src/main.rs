@@ -137,6 +137,57 @@ async fn ignore_finding(finding: i64, ignore: bool) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn set_verdict(finding: i64, harmful: String, by: String) -> Result<String, String> {
+    done(Request::SetVerdict { finding, harmful, by }).await
+}
+
+#[tauri::command]
+async fn processes() -> Result<Vec<syscura_core::ProcessInfo>, String> {
+    match agent_call(Request::Processes).await? {
+        Response::Processes(p) => Ok(p),
+        Response::Error(e) => Err(e),
+        _ => Err("unexpected reply from agent".into()),
+    }
+}
+
+/// Moves one file to the Recycle Bin (it can be restored from there). The
+/// app asks the person first; Windows' own folders are refused.
+#[tauri::command]
+async fn recycle_file(path: String) -> Result<String, String> {
+    use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW};
+    blocking(move || {
+        let p = std::path::Path::new(&path);
+        let b = path.as_bytes();
+        let absolute = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+        if !absolute || path.chars().any(|c| c.is_control()) {
+            return Err("That is not a full file path.".to_string());
+        }
+        if !p.is_file() {
+            return Err("The file is no longer there. Defender may have removed it already.".to_string());
+        }
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).to_ascii_lowercase();
+        if path.to_ascii_lowercase().starts_with(&format!("{windir}\\")) {
+            return Err("Syscura does not delete files inside the Windows folder. Use \"Let Defender remove it\" instead.".to_string());
+        }
+        let mut from: Vec<u16> = path.encode_utf16().collect();
+        from.extend([0, 0]); // double-null-terminated list
+        let mut op = SHFILEOPSTRUCTW {
+            wFunc: FO_DELETE,
+            pFrom: windows::core::PCWSTR(from.as_ptr()),
+            fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI).0 as u16,
+            ..Default::default()
+        };
+        let r = unsafe { SHFileOperationW(&mut op) };
+        if r != 0 || op.fAnyOperationsAborted.as_bool() || p.exists() {
+            Err("Windows did not let Syscura move it (it may be in use, or Defender is holding it). Try \"Let Defender remove it\".".to_string())
+        } else {
+            Ok("Moved to the Recycle Bin. You can restore it from there if this was a mistake.".to_string())
+        }
+    })
+    .await?
+}
+
+#[tauri::command]
 async fn actions() -> Result<Vec<ActionInfo>, String> {
     match agent_call(Request::Actions).await? {
         Response::Actions(a) => Ok(a),
@@ -446,6 +497,9 @@ fn main() {
             run_fix,
             undo_fix,
             ignore_finding,
+            set_verdict,
+            processes,
+            recycle_file,
             actions,
             apply_action,
             ai_status,

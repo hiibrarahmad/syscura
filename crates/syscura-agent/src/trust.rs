@@ -223,6 +223,52 @@ pub fn signature(path: &str) -> Signature {
     }
 }
 
+/// Checks many files in one PowerShell call (the process watch would
+/// otherwise start one PowerShell per program). Paths travel in an
+/// environment variable, separated by `|`, which Windows paths cannot
+/// contain. Files that do not exist come back as `Unknown`.
+pub fn signatures(paths: &[String]) -> std::collections::HashMap<String, Signature> {
+    let mut out: std::collections::HashMap<String, Signature> =
+        paths.iter().map(|p| (p.clone(), Signature::Unknown)).collect();
+    let existing: Vec<&String> = paths.iter().filter(|p| !p.contains('|') && PathBuf::from(p).is_file()).collect();
+    if existing.is_empty() {
+        return out;
+    }
+    let joined = existing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("|");
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let ps = PathBuf::from(windir).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; \
+                  $env:SYSCURA_FILES -split '\\|' | ForEach-Object { \
+                    $s = Get-AuthenticodeSignature -LiteralPath $_ -ErrorAction SilentlyContinue; \
+                    $n = if ($s.SignerCertificate) { $s.SignerCertificate.GetNameInfo('SimpleName', $false) } else { '' }; \
+                    \"$_|$($s.Status)|$n\" }";
+    let Ok(res) = Command::new(ps)
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("SYSCURA_FILES", joined)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return out;
+    };
+    for line in String::from_utf8_lossy(&res.stdout).lines() {
+        let mut parts = line.trim_start_matches('\u{feff}').splitn(3, '|');
+        let (Some(path), Some(status)) = (parts.next(), parts.next()) else { continue };
+        let signer = parts.next().unwrap_or("").trim();
+        let sig = match status.trim() {
+            "Valid" => Signature::Valid(if signer.is_empty() { "unknown publisher".into() } else { signer.to_string() }),
+            "NotSigned" => Signature::Missing,
+            "" | "UnknownError" => Signature::Unknown,
+            other => Signature::Invalid(other.to_string()),
+        };
+        if let Some(slot) = out.get_mut(path) {
+            *slot = sig;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

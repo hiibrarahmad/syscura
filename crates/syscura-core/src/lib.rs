@@ -84,6 +84,46 @@ pub struct LevelCounts {
     pub other: u64,
 }
 
+/// Microsoft Defender's state, from Get-MpComputerStatus.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DefenderInfo {
+    pub antivirus: bool,
+    pub realtime: bool,
+    pub tamper_protected: bool,
+    /// Days since the virus definitions were updated.
+    pub signature_age_days: i64,
+    /// ISO dates, empty when never.
+    pub signatures_updated: String,
+    pub last_quick_scan: String,
+    pub last_full_scan: String,
+    pub checked_ms: i64,
+}
+
+/// One running program, for the Processes page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub parent: u32,
+    pub parent_name: String,
+    pub name: String,
+    /// Full path of the program file; empty when Windows does not say.
+    pub path: String,
+    pub started_ms: i64,
+    pub memory_bytes: u64,
+    /// Share of the whole CPU since the previous listing.
+    pub cpu_pct: f32,
+    pub threads: u32,
+    /// "valid", "unsigned", "invalid", "unknown", or "" (not checked yet).
+    pub signature: String,
+    pub signer: String,
+    /// "system", "program_files", "user" or "other".
+    pub location: String,
+    /// Why Syscura warns about it; empty when it looks normal.
+    pub warning: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub version: String,
@@ -91,6 +131,9 @@ pub struct StatusInfo {
     /// Running as the Windows service (not just for this session).
     #[serde(default)]
     pub service: bool,
+    /// Microsoft Defender's state, checked every half hour.
+    #[serde(default)]
+    pub defender: Option<DefenderInfo>,
     pub uptime_secs: u64,
     /// Physical RAM the agent occupies right now.
     pub working_set_bytes: u64,
@@ -135,6 +178,12 @@ pub enum Request {
         label: String,
         automatic: bool,
     },
+    /// Remember a harm verdict for a problem: harmful "no", "maybe" or
+    /// "yes" ("" forgets it), given by "you" or "ai". The AI cannot clear
+    /// a security threat; only the person can.
+    SetVerdict { finding: i64, harmful: String, by: String },
+    /// Every running program, with details.
+    Processes,
     /// Ask a console-mode agent to exit (used before installing the
     /// service). Refused when running as a service.
     Shutdown,
@@ -148,6 +197,7 @@ pub enum Response {
     Hardware(Box<hw::HardwareInfo>),
     Findings(Vec<findings::Finding>),
     Actions(Vec<findings::ActionInfo>),
+    Processes(Vec<ProcessInfo>),
     Done(String),
     Error(String),
 }

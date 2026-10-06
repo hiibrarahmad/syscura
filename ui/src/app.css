@@ -253,3 +253,7 @@ input.search { width: 260px; flex: none; }
 body { user-select: none; }
 .device, .detail, .box, .history, pre, dd, .ai { user-select: text; }
 html, body { overflow-anchor: none; }
+
+/* A little air between a big number and its unit ("3 %", "16 GB"). */
+.big-num small { margin-left: 0.18em; }
+.stat b { white-space: nowrap; }

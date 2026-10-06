@@ -65,12 +65,15 @@
 
   /** The AI's verdict wins over the rule's default once it has answered. */
   function harm(f: Finding): { value: string; byAi: boolean } {
+    if (f.verdict_by) return { value: f.harmful, byAi: f.verdict_by === "ai" };
     const a = ai.answers[`finding:${f.id}`];
     return a ? { value: a.harmful, byAi: true } : { value: f.harmful, byAi: false };
   }
 
   function verdict(f: Finding): { text: string; tone: string } {
     const h = harm(f).value;
+    if (f.verdict_by === "you" && f.harmful === "no" && f.status !== "fixing") return { text: "Marked safe by you", tone: "ok" };
+    if (f.status === "open" && workedBefore(f) && f.category !== "security") return { text: "Known problem · fixed before", tone: "brand" };
     if (f.status === "fixing") return { text: "Fixing now", tone: "brand" };
     if (f.status === "fixed") return { text: "Fixed", tone: "ok" };
     if (f.status === "ignored") return { text: "Ignored", tone: "quiet" };
@@ -105,6 +108,36 @@
     no: "Windows logs this on many healthy PCs. You can leave it.",
   };
   const riskText = { safe: "Safe, runs right away", caution: "Asks first", risky: "Changes how your PC works" };
+
+  /** Files a problem is about: Defender's detection paths
+   * ("containerfile:_D:\x.iso; file:_D:\x.iso->(Rar)...") or the program
+   * Syscura flagged. Only full paths that look like files. */
+  function affectedFiles(f: Finding): string[] {
+    const raw = f.evidence["Path"] ?? "";
+    const out = new Set<string>();
+    for (let part of raw.split(";")) {
+      part = part.trim().replace(/^[a-z]+:_/i, "").split("->")[0].trim();
+      if (/^[A-Za-z]:\\/.test(part) && !part.endsWith("\\")) out.add(part);
+    }
+    return [...out].slice(0, 8);
+  }
+
+  let deleting = $state<{ finding: Finding; path: string } | null>(null);
+  let fileMsg = $state<{ path: string; text: string; bad?: boolean } | null>(null);
+
+  async function reveal(path: string) {
+    try { await api.reveal(path); } catch (e) { fileMsg = { path, text: `Could not open the folder: ${e}`, bad: true }; }
+  }
+  async function recycle(path: string) {
+    deleting = null;
+    try { fileMsg = { path, text: await api.recycleFile(path) }; } catch (e) { fileMsg = { path, text: String(e), bad: true }; }
+  }
+
+  /** The fix that solved this problem before, if it came back. */
+  function workedBefore(f: Finding) {
+    const a = f.attempts.find((x) => x.verified === true && x.fix_index < f.fixes.length);
+    return a ? f.fixes[a.fix_index] : null;
+  }
 
   function attemptState(a: Finding["attempts"][number]): string {
     if (!a.ok) return "failed";
@@ -228,6 +261,34 @@
         {/if}
       {/each}
 
+      {#each [affectedFiles(f)] as files}
+      {#if files.length && f.harmful !== "no"}
+        <div class="box files">
+          <span class="kicker">{files.length === 1 ? "The file" : "The files"}</span>
+          {#each files as path}
+            <div class="file">
+              <span class="mono path">{path}</span>
+              <div class="row-chips">
+                <button class="btn btn--ghost btn--sm" onclick={() => reveal(path)}>Open folder</button>
+                <button class="btn btn--ghost btn--sm danger" onclick={() => (deleting = { finding: f, path })}>Delete…</button>
+              </div>
+              {#if fileMsg?.path === path}<span class="msg" class:bad={fileMsg.bad}>{fileMsg.text}</span>{/if}
+            </div>
+          {/each}
+          <span class="muted small">Deleting moves the file to the Recycle Bin, so you can restore it. For files Defender is holding, use “Let Defender remove the threats it found” below.</span>
+        </div>
+      {/if}
+      {/each}
+
+      {#each [f.status === "open" || f.status === "fix_failed" ? workedBefore(f) : null] as again}
+      {#if again}
+        <div class="fix again">
+          <div><b>Fix again: {again.label}</b><small>This fixed the same problem before. It came back, so running it again usually works.</small></div>
+          <button class="btn" onclick={() => runFix(f, again)}>Fix again</button>
+        </div>
+      {/if}
+      {/each}
+
       {#if f.fixes.length}
         <div style="display: flex; flex-direction: column; gap: 10px">
           {#each f.fixes as fix}
@@ -279,12 +340,34 @@
       </details>
 
       <div class="row-chips">
+        {#if f.verdict_by === "you"}
+          <button class="btn btn--ghost btn--sm" onclick={() => act(f.id, () => api.setVerdict(f.id, "", "you"))}>Forget my verdict</button>
+        {:else}
+          <button class="btn btn--ghost btn--sm" title="You know this and trust it: Syscura remembers and will not warn about it again." onclick={() => act(f.id, () => api.setVerdict(f.id, "no", "you"))}>Mark as safe</button>
+          {#if f.harmful !== "yes"}<button class="btn btn--ghost btn--sm" onclick={() => act(f.id, () => api.setVerdict(f.id, "yes", "you"))}>This is harmful</button>{/if}
+        {/if}
         <button class="btn btn--ghost btn--sm" onclick={() => act(f.id, () => api.ignoreFinding(f.id, f.status !== "ignored"))}>
           {f.status === "ignored" ? "Stop ignoring" : "Ignore this"}
         </button>
       </div>
     </section>
     {/key}
+  </div>
+{/if}
+
+{#if deleting}
+  {@const d = deleting}
+  <div class="overlay" role="presentation" onclick={() => (deleting = null)}>
+    <div class="panel dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === "Escape" && (deleting = null)}>
+      <span class="pill pill--bad" style="align-self: flex-start">Delete a file</span>
+      <span class="title-m">Move this file to the Recycle Bin?</span>
+      <p class="mono path">{d.path}</p>
+      <p class="muted">Only do this if you do not need the file. If it is part of a program you use, that program may stop working. The file goes to the Recycle Bin, so you can restore it from there. If it is an installer or archive you downloaded, deleting it is usually the right move.</p>
+      <div class="row-chips" style="justify-content: flex-end">
+        <button class="btn btn--ghost" onclick={() => (deleting = null)}>Cancel</button>
+        <button class="btn danger-solid" onclick={() => recycle(d.path)}>Move to Recycle Bin</button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -318,6 +401,14 @@
   .running { margin: 0; display: flex; gap: 10px; align-items: center; font-size: 14px; color: var(--muted); }
   .next { display: flex; flex-direction: column; gap: 8px; background: var(--warn-bg); font-size: 14px; }
   .fix .btn { min-width: 74px; }
+  .files { display: flex; flex-direction: column; gap: 10px; }
+  .file { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+  .path { overflow-wrap: anywhere; font-size: 12.5px; }
+  .small { font-size: 13px; }
+  .danger { color: var(--bad-ink); }
+  .danger-solid { background: var(--bad); color: #fff; }
+  .danger-solid:hover { background: var(--bad-ink); }
+  .again { border-color: var(--brand); background: var(--brand-soft); }
   .aicheck { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
   .aicheck ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
   .bad { color: var(--bad); }

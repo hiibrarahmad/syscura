@@ -2,6 +2,7 @@
   import { ai, refreshAi } from "../lib/ai.svelte";
   import { api } from "../lib/api";
   import { LINKS } from "../lib/links";
+  import SocialLinks from "../lib/SocialLinks.svelte";
   import { onMount } from "svelte";
   import type { StatusInfo } from "../lib/types";
 
@@ -107,11 +108,7 @@
       <button class="btn btn--ghost btn--sm" onclick={() => api.open(LINKS.releases)}>Check for updates</button>
       <button class="btn btn--ghost btn--sm" onclick={() => api.open(LINKS.repo)}>Source code</button>
     </div>
-    <div class="links">
-      <button class="link" onclick={() => api.open(LINKS.github)}>GitHub · hiibrarahmad</button>
-      <button class="link" onclick={() => api.open(LINKS.linkedin)}>LinkedIn · Ibrar Ahmad</button>
-      <button class="link" onclick={() => api.open(LINKS.website)}>hiibrarahmad.github.io</button>
-    </div>
+    <SocialLinks />
     <p class="muted">If Syscura helped you, a ⭐ on GitHub helps others find it.</p>
   </section>
 </div>

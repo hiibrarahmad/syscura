@@ -17,7 +17,31 @@ Installs like any other Windows program, and stays with you in the tray.
 - **Windows notifications for serious problems now work with the window closed.**
 - Starting Syscura a second time opens the running copy instead of a new one.
 
+### Catches what antivirus misses
+- **Live process watch** (light: a process snapshot every 2 seconds, each program file checked once). It flags:
+  - programs pretending to be part of Windows (for example `svchost.exe` outside System32);
+  - unsigned programs running from Temp, Downloads or AppData;
+  - Office and PDF programs starting PowerShell, cmd or script hosts.
+- **Startup check** every 6 hours: Run keys, Startup folders and scheduled tasks. It flags unsigned programs in user folders and hidden, encoded or downloading scripts.
+- New **Processes** page: every running program live, with CPU, memory, folder, publisher and signature. *Open folder*, *Scan with Defender* and *Stop* (asks first) for each.
+- New actions:
+  - *Scan this file or folder with Defender*;
+  - *Let Defender remove the threats it found*;
+  - *Defender Offline scan*, for malware that hides while Windows runs;
+  - *Stop this program* (never Windows' critical processes).
+- For virus detections, the affected files are listed with **Open folder** and **Delete…**. Delete warns first and moves the file to the Recycle Bin, so it can be restored.
+
+### Remembers
+- **Mark as safe** (and *This is harmful*) is saved for good: the same thing is never flagged again. The AI's verdict is saved too, but the AI can never clear a security threat; only you can.
+- When a problem comes back after a fix that was confirmed to work, Syscura runs the same fix again automatically if it is safe, or offers **Fix again**.
+
+### Overview
+- The right panel now shows Defender's state, virus-definition age, last quick and full scan, tamper protection, today's Windows errors, PC running time, free disk space and battery.
+- More space between numbers and their units.
+- The serious-problem banner can be closed. It comes back only for a new serious problem, and backing up is offered, not pushed.
+
 ### Fixes
+- The installer no longer shows "service does not exist" or "process not found" lines on a fresh install.
 - "Install as a Windows service" no longer reports a false failure: it checks what Windows actually says. It also replaces a service installed from another folder, with one admin prompt.
 - Pressing Start no longer launches a second agent when protection is already on.
 - The service waits briefly for a session agent that is still closing, instead of failing.

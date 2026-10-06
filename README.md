@@ -37,6 +37,9 @@ Windows logs thousands of warnings. Most are noise, a few really matter, and alm
 | 🛠️ **Fixes without breaking things** | Safe fixes (restart a crashed service, update Defender, sync the clock) run by themselves. Anything that changes your PC asks first, makes a restore point, and records an **Undo**. Nothing is ever deleted. |
 | ✅ **Honest about results** | If SFC finds nothing to repair, Syscura says *"found nothing wrong, so it was not the cause"* instead of pretending it fixed something. After any fix, the AI reads the result and tells you **Fixed / Not fixed** and what to try next. |
 | ✦ **Free AI help, no key needed** | One click opens **ChatGPT, Claude, Copilot, Gemini or Google AI Mode** in your browser with the problem already written out (private details removed). Or add a free Gemini key and Syscura searches the web, explains, and picks fixes from its safe list. |
+| 🕵️ **Catches what antivirus misses** | A light **live process watch** flags fake Windows processes (an `svchost.exe` outside System32), unsigned programs running from Temp, Downloads or AppData, and Office or PDF readers starting PowerShell. A scan of **everything that starts with Windows** (Run keys, Startup folders, scheduled tasks) flags unsigned programs and hidden or downloading scripts. Brand-new malware has no signature yet, but it still has to run and stay running. |
+| 🗂️ **Every process, live** | The **Processes** page lists every running program with CPU, memory, folder, publisher and signature, and marks anything suspicious. Open its folder, scan it with Defender, or stop it (asks first). |
+| 🧠 **Remembers** | Press **Mark as safe** once and Syscura never warns about that thing again. If a problem returns after a fix that worked, Syscura applies the same fix again. |
 | 🛡️ **Warns you and protects your files** | Serious problems (virus found, failing drive, repeated blue screens) show a red banner and a Windows notification, with a **Back up my files now** button that copies your folders to another drive. |
 | 🔬 **Accurate hardware, any PC** | Read fresh at every start from Windows itself: exact Windows 11 version and build, board and BIOS, CPU, every RAM stick's part number, GPU, drives with health and wear, monitors, battery wear, network, USB. Anything your PC doesn't report says *Not reported*. No guessing. |
 | 🪶 **Tiny** | The background agent uses **~13 MB of RAM and 0% CPU when idle**. It sleeps until Windows reports something. The window only runs while you look at it. |
@@ -80,7 +83,7 @@ Syscura's knowledge base lives in [`kb/rules.toml`](kb/rules.toml): 24 plain, re
 
 | Area | Examples |
 |---|---|
-| **Security** | Defender found a threat · real-time protection turned off · virus definitions failing to update · a new service or driver installed (checked for a valid signature and a suspicious location) · an event log was cleared · suspicious PowerShell |
+| **Security** | Fake Windows processes · unsigned programs in user folders · documents starting command shells · unsigned or script-based startup items · Defender found a threat · real-time protection turned off · virus definitions failing to update · a new service or driver installed (checked for a valid signature and a suspicious location) · an event log was cleared · suspicious PowerShell |
 | **Software** | Services crashing or failing to start · programs crashing or hanging · **blue screens with the stop code decoded** (0x3B → SYSTEM_SERVICE_EXCEPTION, usually a driver) · drivers failing to load · Windows Update failing |
 | **Hardware** | Corrected and fatal hardware errors (WHEA) · unexpected power loss |
 | **Storage** | Disk read/write errors · NTFS damage · low disk space |
@@ -212,7 +215,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines.
 
 <div align="center">
 
-Made by **Ibrar Ahmad** · [GitHub](https://github.com/hiibrarahmad) · [LinkedIn](https://www.linkedin.com/in/hiibrarahmad/) · [Website](https://hiibrarahmad.github.io/) · MIT licensed
+Made by **Ibrar Ahmad** · MIT licensed
+
+[![GitHub](https://img.shields.io/badge/GitHub-hiibrarahmad-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/hiibrarahmad)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Ibrar%20Ahmad-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/hiibrarahmad/)
+[![Website](https://img.shields.io/badge/Website-hiibrarahmad.github.io-4f46e5?style=for-the-badge&logo=googlechrome&logoColor=white)](https://hiibrarahmad.github.io/)
 
 If Syscura helped you understand or fix your PC, a ⭐ helps others find it.
 

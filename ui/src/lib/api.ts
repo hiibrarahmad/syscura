@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
-  ActionInfo, AiStatus, Analysis, BackupInfo, Finding, HardwareView, Question, Sensor, StatusInfo, StoredEvent,
+  ActionInfo, AiStatus, Analysis, BackupInfo, Finding, HardwareView, ProcessInfo, Question, Sensor, StatusInfo, StoredEvent,
 } from "./types";
 
 export const api = {
@@ -13,6 +13,10 @@ export const api = {
   runFix: (finding: number, fix: number) => invoke<string>("run_fix", { finding, fix }),
   undoFix: (attempt: number) => invoke<string>("undo_fix", { attempt }),
   ignoreFinding: (finding: number, ignore: boolean) => invoke<string>("ignore_finding", { finding, ignore }),
+  setVerdict: (finding: number, harmful: string, by: "you" | "ai") => invoke<string>("set_verdict", { finding, harmful, by }),
+  processes: () => invoke<ProcessInfo[]>("processes"),
+  recycleFile: (path: string) => invoke<string>("recycle_file", { path }),
+  reveal: (path: string) => revealItemInDir(path),
   actions: () => invoke<ActionInfo[]>("actions"),
   applyAction: (a: { finding: number | null; title: string; action: string; params: Record<string, string>; label: string; automatic: boolean }) =>
     invoke<string>("apply_action", a),

@@ -64,6 +64,10 @@ export async function ask(key: string, q: Question): Promise<Analysis | null> {
   try {
     const a = await api.aiAsk(q);
     ai.answers[key] = a;
+    // Remember the AI's harm verdict for this problem, so a repeat is not
+    // flagged again. (The agent never lets the AI clear a security threat.)
+    const m = /^finding:(\d+)$/.exec(key);
+    if (m && a.harmful) api.setVerdict(Number(m[1]), a.harmful, "ai").catch(() => {});
     return a;
   } catch (e) {
     ai.errors[key] = String(e);

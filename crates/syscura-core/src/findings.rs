@@ -139,4 +139,8 @@ pub struct Finding {
     /// A good web search for this exact problem.
     #[serde(default)]
     pub search: String,
+    /// Who decided `harmful`, when it is not the rule's default: "you"
+    /// (marked safe or harmful) or "ai".
+    #[serde(default)]
+    pub verdict_by: String,
 }

@@ -66,6 +66,9 @@ jobs:
           if (-not $hw.os.build) { throw "Windows build not read" }
           if ($hw.cpus.Count -lt 1) { throw "no processor found" }
           if ($hw.disks.Count -lt 1 -and $hw.volumes.Count -lt 1) { throw "no storage found" }
+      - name: Run Syscura's own checks once (process watch, startup items, Defender)
+        shell: pwsh
+        run: target\release\syscura-agent.exe selftest
       - name: Start the agent and talk to it
         shell: pwsh
         run: |
@@ -76,6 +79,8 @@ jobs:
           Start-Sleep 20
           & target\release\syscura-cli.exe problems
           if ($LASTEXITCODE) { throw "problems query failed" }
+          & target\release\syscura-cli.exe processes --warn
+          if ($LASTEXITCODE) { throw "process list failed" }
           Get-Content "$env:RUNNER_TEMP\syscura\agent.log"
           Stop-Process $p
 

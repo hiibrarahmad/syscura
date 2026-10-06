@@ -11,9 +11,10 @@
   import Events from "./views/Events.svelte";
   import Settings from "./views/Settings.svelte";
   import Backup from "./views/Backup.svelte";
+  import Processes from "./views/Processes.svelte";
   import { backupFirst, isCritical } from "./lib/warnings";
 
-  type View = "overview" | "problems" | "hardware" | "events" | "backup" | "settings";
+  type View = "overview" | "problems" | "processes" | "hardware" | "events" | "backup" | "settings";
   let view = $state<View>("overview");
   let hw = $state<HardwareInfo | null>(null);
   let fromAgent = $state(false);
@@ -24,6 +25,14 @@
   let error = $state("");
   const problemCount = $derived(findings.filter(needsAttention).length);
   const critical = $derived(findings.filter(isCritical));
+  // The banner is a reminder, not a wall: closing it hides it until a new
+  // serious problem appears (or an old one happens again).
+  const criticalKey = $derived(critical.map((f) => `${f.id}:${f.count}`).sort().join(","));
+  let dismissed = $state(((): string => { try { return localStorage.getItem("syscura.banner.dismissed") ?? ""; } catch { return ""; } })());
+  function dismissBanner() {
+    dismissed = criticalKey;
+    try { localStorage.setItem("syscura.banner.dismissed", criticalKey); } catch { /* fine */ }
+  }
 
   async function scan(refresh: boolean) {
     scanning = true;
@@ -61,7 +70,7 @@
 
   onMount(() => {
     invoke<string | null>("initial_view").then((v) => {
-      if (v === "overview" || v === "problems" || v === "hardware" || v === "events" || v === "backup" || v === "settings") view = v;
+      if (nav.some((n) => n.id === v)) view = v as View;
     }).catch(() => {});
     // The tray menu's "Show problems".
     const onView = (e: Event) => { const v = (e as CustomEvent<string>).detail; if (nav.some((n) => n.id === v)) go(v as View); };
@@ -81,6 +90,7 @@
   const nav: { id: View; label: string }[] = [
     { id: "overview", label: "Overview" },
     { id: "problems", label: "Problems" },
+    { id: "processes", label: "Processes" },
     { id: "hardware", label: "Hardware" },
     { id: "events", label: "Events" },
     { id: "backup", label: "Backup" },
@@ -104,15 +114,16 @@
     </span>
   </header>
 
-  {#if critical.length && view !== "backup"}
+  {#if critical.length && view !== "backup" && dismissed !== criticalKey}
     <section class="critical">
       <span class="pill pill--bad">{critical.length === 1 ? "Serious problem" : `${critical.length} serious problems`}</span>
       <div class="ctext">
         <b>{critical.length === 1 ? critical[0].title : critical.map((c) => c.title).slice(0, 2).join(" · ")}</b>
         <span class="muted">{critical.some(backupFirst) ? "Back up your important files now, then follow the steps on the Problems page." : "See the Problems page for what it means and what to do."}</span>
       </div>
-      {#if critical.some(backupFirst)}<button class="btn" onclick={() => go("backup")}>Back up my files now</button>{/if}
-      <button onclick={() => go("problems")}>What to do</button>
+      <button class="btn" onclick={() => go("problems")}>What to do</button>
+      {#if critical.some(backupFirst)}<button class="btn btn--ghost" onclick={() => go("backup")}>Back up files</button>{/if}
+      <button class="close" title="Close. It comes back only for a new serious problem." aria-label="Close" onclick={dismissBanner}>✕</button>
     </section>
   {/if}
 
@@ -123,6 +134,8 @@
       onproblems={() => go("problems")} onhardware={() => go("hardware")} onsettings={() => go("settings")} />
   {:else if view === "problems"}
     <Problems />
+  {:else if view === "processes"}
+    <Processes />
   {:else if view === "hardware" && hw}
     <Hardware {hw} {sensors} {fromAgent} onrescan={() => scan(true)} {scanning} />
   {:else if view === "events"}
@@ -143,4 +156,6 @@
   .critical { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; background: var(--panel); border-radius: var(--r-panel); padding: 18px 24px; box-shadow: inset 0 0 0 1px var(--bad-bg); }
   .ctext { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
   .ctext b { font-weight: 600; font-size: 15.5px; }
+  .close { border: 0; background: none; color: var(--muted); font-size: 16px; padding: 6px 10px; }
+  .close:hover { color: var(--text); background: var(--panel-2); }
 </style>

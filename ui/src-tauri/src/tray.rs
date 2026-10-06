@@ -70,7 +70,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 /// Problems where the person's files or PC are at real risk. Mirrors
 /// `isCritical` in ui/src/lib/warnings.ts.
 fn is_serious(f: &Finding) -> bool {
-    if f.category == "noise" || !matches!(f.status, FindingStatus::Open | FindingStatus::FixFailed) {
+    if f.category == "noise" || f.harmful == Harm::No || !matches!(f.status, FindingStatus::Open | FindingStatus::FixFailed) {
         return false;
     }
     let dangerous = ["disk.errors", "disk.ntfs", "hw.whea_fatal", "sec.threat", "sys.bsod"];
@@ -80,7 +80,7 @@ fn is_serious(f: &Finding) -> bool {
 fn needs_attention(f: &Finding) -> bool {
     f.category != "noise"
         && matches!(f.status, FindingStatus::Open | FindingStatus::FixFailed)
-        && !(f.harmful == Harm::No && f.severity == Level::Info)
+        && !(f.harmful == Harm::No && (f.severity == Level::Info || f.verdict_by == "you"))
 }
 
 fn start_watcher(app: AppHandle) {

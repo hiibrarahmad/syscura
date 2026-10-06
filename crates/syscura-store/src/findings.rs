@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS findings (
     count    INTEGER NOT NULL,
     status   TEXT    NOT NULL,
     evidence TEXT    NOT NULL,
+    verdict    TEXT  NOT NULL DEFAULT '',
+    verdict_by TEXT  NOT NULL DEFAULT '',
     UNIQUE (rule_id, grp)
 );
 CREATE TABLE IF NOT EXISTS fix_attempts (
@@ -44,6 +46,16 @@ pub(crate) fn migrate(conn: &rusqlite::Connection) -> Result<()> {
     if !has_outcome {
         conn.execute_batch("ALTER TABLE fix_attempts ADD COLUMN outcome TEXT NOT NULL DEFAULT ''")?;
     }
+    let has_findings: bool = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'findings'")?.exists([])?;
+    let has_verdict: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('findings') WHERE name = 'verdict'")?
+        .exists([])?;
+    if has_findings && !has_verdict {
+        conn.execute_batch(
+            "ALTER TABLE findings ADD COLUMN verdict TEXT NOT NULL DEFAULT '';
+             ALTER TABLE findings ADD COLUMN verdict_by TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
     Ok(())
 }
 
@@ -58,6 +70,11 @@ pub struct FindingRow {
     pub count: u64,
     pub status: FindingStatus,
     pub evidence: BTreeMap<String, String>,
+    /// A remembered harm verdict ("no", "maybe", "yes"), or "" for the
+    /// rule's default. Kept when the same problem happens again.
+    pub verdict: String,
+    /// Who gave the verdict: "you" or "ai".
+    pub verdict_by: String,
 }
 
 /// What recording a hit did to the finding.
@@ -67,8 +84,12 @@ pub enum Recorded {
     New(i64),
     /// An open finding got another occurrence.
     Repeat(i64),
-    /// A finding marked fixed came back: the fix did not hold.
+    /// A finding marked fixed came back before its fix was confirmed: the
+    /// fix did not hold.
     Returned(i64),
+    /// A finding whose fix was confirmed happened again later. The fix is
+    /// known to work, so it can simply be applied again.
+    CameBack(i64),
     /// The user ignores this finding; only the counter moved.
     Ignored(i64),
 }
@@ -96,7 +117,19 @@ impl Store {
             }
             Some((id, status)) => {
                 let status = FindingStatus::parse(&status);
+                let fix_confirmed = status == FindingStatus::Fixed
+                    && self
+                        .conn
+                        .query_row(
+                            "SELECT verified FROM fix_attempts WHERE finding_id = ?1 ORDER BY id DESC LIMIT 1",
+                            [id],
+                            |r| r.get::<_, Option<bool>>(0),
+                        )
+                        .optional()?
+                        .flatten()
+                        == Some(true);
                 let new_status = match status {
+                    FindingStatus::Fixed if fix_confirmed => FindingStatus::Open,
                     FindingStatus::Fixed => FindingStatus::FixFailed,
                     other => other,
                 };
@@ -105,6 +138,7 @@ impl Store {
                     params![id, ts, new_status.as_str(), ev],
                 )?;
                 Ok(match status {
+                    FindingStatus::Fixed if fix_confirmed => Recorded::CameBack(id),
                     FindingStatus::Fixed => {
                         // The latest fix did not hold.
                         self.conn.execute(
@@ -126,10 +160,19 @@ impl Store {
         Ok(())
     }
 
+    /// Remembers a harm verdict for a problem ("" forgets it).
+    pub fn set_verdict(&self, id: i64, verdict: &str, by: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE findings SET verdict = ?2, verdict_by = ?3 WHERE id = ?1",
+            params![id, verdict, if verdict.is_empty() { "" } else { by }],
+        )?;
+        Ok(())
+    }
+
     pub fn finding(&self, id: i64) -> Result<Option<FindingRow>> {
         self.conn
             .query_row(
-                "SELECT id, rule_id, grp, first_ts, last_ts, count, status, evidence FROM findings WHERE id = ?1",
+                "SELECT id, rule_id, grp, first_ts, last_ts, count, status, evidence, verdict, verdict_by FROM findings WHERE id = ?1",
                 [id],
                 row_to_finding,
             )
@@ -177,7 +220,7 @@ impl Store {
     /// problems whose fix was confirmed more than a day ago are left out.
     pub fn findings(&self, include_closed: bool, limit: u32) -> Result<Vec<FindingRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, rule_id, grp, first_ts, last_ts, count, status, evidence FROM findings
+            "SELECT id, rule_id, grp, first_ts, last_ts, count, status, evidence, verdict, verdict_by FROM findings
              ORDER BY last_ts DESC LIMIT ?1",
         )?;
         let day_ago = syscura_core::now_ms() - 24 * 60 * 60 * 1000;
@@ -280,6 +323,8 @@ fn row_to_finding(r: &rusqlite::Row<'_>) -> rusqlite::Result<FindingRow> {
         count: r.get::<_, i64>(5)? as u64,
         status: FindingStatus::parse(&r.get::<_, String>(6)?),
         evidence: serde_json::from_str(&ev).unwrap_or_default(),
+        verdict: r.get(8)?,
+        verdict_by: r.get(9)?,
     })
 }
 
@@ -343,5 +388,26 @@ mod tests {
         assert!(s.findings(false, 50).unwrap().is_empty());
         assert_eq!(s.findings(true, 50).unwrap().len(), 1);
         assert_eq!(s.automatic_attempts_since(0).unwrap(), 1);
+    }
+
+    #[test]
+    fn confirmed_fix_then_comes_back_and_verdict_is_kept() {
+        let s = Store::open_in_memory().unwrap();
+        let ev = BTreeMap::new();
+        let Recorded::New(id) = s.record_hit("svc.crash", "Spooler", 10, &ev).unwrap() else { panic!("expected new") };
+        let a = s.add_attempt(id, &attempt(true)).unwrap();
+        s.set_attempt_verified(a, true, None).unwrap();
+        s.set_finding_status(id, FindingStatus::Fixed).unwrap();
+        s.set_verdict(id, "no", "you").unwrap();
+
+        // A week later it happens again: known problem, known fix.
+        assert_eq!(s.record_hit("svc.crash", "Spooler", 99, &ev).unwrap(), Recorded::CameBack(id));
+        let f = s.finding(id).unwrap().unwrap();
+        assert_eq!(f.status, FindingStatus::Open);
+        assert_eq!((f.verdict.as_str(), f.verdict_by.as_str()), ("no", "you"));
+        assert_eq!(s.attempt(a).unwrap().unwrap().1.verified, Some(true), "the fix still counts as one that worked");
+
+        s.set_verdict(id, "", "you").unwrap();
+        assert_eq!(s.finding(id).unwrap().unwrap().verdict_by, "");
     }
 }

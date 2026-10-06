@@ -146,6 +146,10 @@ impl Engine {
         }
         for r in &self.book.rules {
             let m = &r.matcher;
+            // Syscura's own checks ("Syscura/...") are not Windows logs.
+            if m.channel.starts_with("Syscura/") {
+                continue;
+            }
             let ids = m.event_ids.iter().map(|id| format!("EventID={id}")).collect::<Vec<_>>().join(" or ");
             let mut clause = format!("({ids})");
             if !m.levels.is_empty() {
@@ -270,8 +274,23 @@ mod tests {
     const KNOWN_ACTIONS: &[&str] = &[
         "service.ensure_running", "service.disable", "dns.flush", "time.resync", "defender.quick_scan",
         "defender.full_scan", "defender.update", "defender.enable_realtime", "sfc.scan", "dism.restore_health",
-        "chkdsk.scan", "winsock.reset", "wu.reset_cache", "restore_point",
+        "chkdsk.scan", "winsock.reset", "wu.reset_cache", "restore_point", "defender.scan_path",
+        "defender.remove_threats", "defender.offline_scan", "process.stop",
     ];
+
+    #[test]
+    fn syscura_checks_are_rules_but_not_windows_logs() {
+        let mut e = Engine::builtin().unwrap();
+        assert!(e.subscriptions().keys().all(|ch| !ch.starts_with("Syscura/")));
+        let path = r"C:\Users\a\AppData\Local\Temp\svchost.exe";
+        let hits = e.evaluate(&ev("Syscura/Processes", "Syscura", 1, Level::Critical, 5, &[
+            ("Name", "svchost.exe"),
+            ("Path", path),
+            ("Pid", "4242"),
+        ]));
+        let h = hits.iter().find(|h| h.rule == "proc.fake_system").expect("fake system process should match");
+        assert_eq!(h.group, path);
+    }
 
     #[test]
     fn service_crash_groups_by_service() {

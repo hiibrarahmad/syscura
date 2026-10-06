@@ -15,7 +15,7 @@ use syscura_store::{Recorded, Store};
 
 use crate::hardware::{self, HardwareCache};
 use crate::heal::{self, Job};
-use crate::{ipc, log, trust};
+use crate::{ipc, log, trust, watch};
 
 const PRUNE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const RETENTION: Duration = Duration::from_secs(90 * 24 * 60 * 60);
@@ -40,6 +40,8 @@ pub struct Shared {
     pub jobs: Mutex<Sender<Job>>,
     /// Running in a console (not as the Windows service).
     pub console: bool,
+    /// The process watch, startup scan and Defender status.
+    pub watch: Arc<watch::Watch>,
 }
 
 /// Runs until a `Msg::Stop` arrives on `rx`. `tx` is handed to sensors.
@@ -77,16 +79,19 @@ pub fn run(data_dir: PathBuf, tx: Sender<Msg>, rx: Receiver<Msg>, console: bool)
     heal::start(db_path.clone(), jobs_rx)?;
 
     let hardware_cache = Arc::new(HardwareCache::default());
+    let watcher = Arc::new(watch::Watch::default());
     let shared = Arc::new(Shared {
         started: Instant::now(),
         sensors,
         hardware: hardware_cache.clone(),
         jobs: Mutex::new(jobs_tx.clone()),
         console,
+        watch: watcher.clone(),
     });
     ipc::start(db_path, shared)?;
     hardware::start_boot_check(data_dir.clone(), hardware_cache, tx.clone());
     start_history_check(queries, tx.clone());
+    watch::start(watcher, tx.clone());
     log::info(&format!("agent started, data in {}", data_dir.display()));
 
     let mut last_prune: Option<Instant> = None;
@@ -152,6 +157,21 @@ fn process(store: &Store, engine: &mut Engine, e: &Event, live: Option<(&Sender<
             }
             Recorded::Returned(id) => {
                 log::info(&format!("finding {id} came back after a fix: {}", rule.title));
+                id
+            }
+            Recorded::CameBack(id) => {
+                log::info(&format!("finding {id} happened again after a confirmed fix: {}", rule.title));
+                // Known problem, known fix: apply the fix that worked, when
+                // it is safe and this is happening now.
+                if let Some((jobs, _)) = live.as_mut()
+                    && let Some(last) = store.attempts(id).ok().and_then(|a| a.into_iter().next())
+                    && last.verified == Some(true)
+                    && let Some(spec) = rule.fixes.get(last.fix_index)
+                    && spec.risk == syscura_core::findings::Risk::Safe
+                {
+                    let _ = jobs.send(Job::Fix { finding: id, fix: last.fix_index, automatic: true });
+                    continue;
+                }
                 id
             }
             Recorded::Repeat(id) => id,

@@ -31,3 +31,84 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace
+
+  # Runs Syscura on other machines (GitHub's clean Windows VMs: different
+  # hardware, no GPU, no battery) to prove it reads them and starts.
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build agent and command line tool
+        run: cargo build --release -p syscura-agent -p syscura-cli
+      - name: Read this machine's hardware
+        shell: pwsh
+        run: |
+          $hw = & target\release\syscura-agent.exe hwscan | ConvertFrom-Json
+          "Windows: $($hw.os.name) $($hw.os.version) build $($hw.os.build)"
+          "Computer: $($hw.system.manufacturer) $($hw.system.model) (VM: $($hw.system.virtual_machine))"
+          "Board: $($hw.board.manufacturer) $($hw.board.product)"
+          "CPU: $($hw.cpus[0].name) ($($hw.cpus[0].cores) cores)"
+          "Memory: $($hw.memory.usable_bytes) bytes, $($hw.memory.sticks.Count) sticks"
+          "GPUs: $($hw.gpus.Count) · Disks: $($hw.disks.Count) · Volumes: $($hw.volumes.Count) · Network: $($hw.network.Count)"
+          if (-not $hw.os.build) { throw "Windows build not read" }
+          if ($hw.cpus.Count -lt 1) { throw "no processor found" }
+          if ($hw.disks.Count -lt 1 -and $hw.volumes.Count -lt 1) { throw "no storage found" }
+      - name: Start the agent and talk to it
+        shell: pwsh
+        run: |
+          $p = Start-Process target\release\syscura-agent.exe -ArgumentList 'run','--data-dir',"$env:RUNNER_TEMP\syscura" -PassThru -WindowStyle Hidden
+          $ok = $false
+          foreach ($i in 1..30) { Start-Sleep 2; & target\release\syscura-cli.exe status; if ($LASTEXITCODE -eq 0) { $ok = $true; break } }
+          if (-not $ok) { Get-Content "$env:RUNNER_TEMP\syscura\agent.log" -ErrorAction SilentlyContinue; throw "the agent did not answer" }
+          Start-Sleep 20
+          & target\release\syscura-cli.exe problems
+          if ($LASTEXITCODE) { throw "problems query failed" }
+          Get-Content "$env:RUNNER_TEMP\syscura\agent.log"
+          Stop-Process $p
+
+  # Builds the Setup installer and installs, checks and uninstalls it on a
+  # clean machine, the way a user would.
+  installer:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the installer
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
+      - name: Install silently
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist\*-setup.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          Get-ChildItem "C:\Program Files\Syscura"
+          foreach ($f in 'Syscura.exe','syscura-agent.exe','syscura-cli.exe') { if (-not (Test-Path "C:\Program Files\Syscura\$f")) { throw "$f missing" } }
+      - name: Background service runs and answers
+        shell: pwsh
+        run: |
+          $ok = $false
+          foreach ($i in 1..30) { Start-Sleep 2; & "C:\Program Files\Syscura\syscura-cli.exe" status; if ($LASTEXITCODE -eq 0) { $ok = $true; break } }
+          sc.exe query Syscura
+          if (-not $ok) { throw "the service did not answer" }
+          if ((Get-Service Syscura).StartType -ne 'Automatic') { throw "service does not start with Windows" }
+          if (-not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\Syscura.lnk")) { throw "tray auto-start missing" }
+      - name: Uninstall cleanly
+        shell: pwsh
+        run: |
+          Start-Process "C:\Program Files\Syscura\uninstall.exe" -ArgumentList '/S' -Wait
+          Start-Sleep 5
+          if (Get-Service Syscura -ErrorAction SilentlyContinue) { throw "service left behind" }
+          if (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\Syscura.lnk") { throw "auto-start left behind" }
+          "Uninstalled cleanly."

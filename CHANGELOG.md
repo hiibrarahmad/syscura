@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.0-beta.3
+
+Installs like any other Windows program, and stays with you in the tray.
+
+### Install
+- **Setup installer** (`Syscura-<version>-setup.exe`): installs to Program Files with a Start menu entry and an uninstaller in Settings → Apps.
+- The installer sets up **background protection as a Windows service** that starts with Windows. No extra clicks.
+- Updating over an older version, or over a copy in another folder, replaces it cleanly. Uninstalling removes the service and auto-start too.
+- On Windows 10 without WebView2, the installer adds it.
+
+### Tray
+- **Syscura lives in the taskbar tray.** It starts quietly there after every restart. Click to open, right-click for *Open*, *Show problems* or *Quit*.
+- Closing the window keeps Syscura in the tray and frees the window's memory.
+- The tray tooltip shows whether protection is on and how many things need you.
+- **Windows notifications for serious problems now work with the window closed.**
+- Starting Syscura a second time opens the running copy instead of a new one.
+
+### Fixes
+- "Install as a Windows service" no longer reports a false failure: it checks what Windows actually says. It also replaces a service installed from another folder, with one admin prompt.
+- Pressing Start no longer launches a second agent when protection is already on.
+- The service waits briefly for a session agent that is still closing, instead of failing.
+- "AI help: ·" is shown properly when no model was used yet.
+- Privacy masking can no longer break on user names in other scripts (Urdu, Arabic, Turkish and others).
+
+### More
+- Settings: a *Background protection* status and an *About and help* section with links to report a problem, ask a question, check for updates, and the author's GitHub, LinkedIn and website.
+- Every change is now tested on clean Windows machines (Server 2022 and 2025): hardware scan, agent start, and a full install, service check and uninstall.
+
 ## 0.1.0-beta.2
 
 A big one: new look, free AI help, honest fix results, backups, and a hardware report that works on any PC.

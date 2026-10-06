@@ -220,6 +220,11 @@ fn replace_ci(haystack: &str, needle: &str, with: &str) -> String {
     let mut out = String::with_capacity(haystack.len());
     let mut i = 0;
     while let Some(pos) = lower[i..].find(&n) {
+        // Lowercasing can move character boundaries in rare scripts; never
+        // cut inside a character.
+        if !haystack.is_char_boundary(i + pos) || !haystack.is_char_boundary(i + pos + n.len()) {
+            break;
+        }
         out.push_str(&haystack[i..i + pos]);
         out.push_str(with);
         i += pos + n.len();
@@ -347,6 +352,13 @@ mod tests {
         assert!(p.contains("Problem: Disk error") && p.contains("Event ID: 7") && p.contains("My system: Windows 11"));
         assert!(p.contains("back up my files first"));
         assert!(!p.contains("catalog"), "no machine instructions in a human prompt");
+    }
+
+    #[test]
+    fn redaction_handles_non_english_names() {
+        let s = Secrets { user_name: "عمران".into(), computer_name: "PC-محمد".into(), profile_dir: r"C:\Users\عمران".into() };
+        let t = r"Failed for C:\Users\عمران\Desktop\İstanbul ß.exe on PC-محمد by عمران";
+        assert_eq!(redact(t, &s), r"Failed for %USERPROFILE%\Desktop\İstanbul ß.exe on <pc> by <user>");
     }
 
     #[test]

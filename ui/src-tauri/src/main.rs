@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backup;
+mod tray;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -320,6 +321,10 @@ fn agent_exe() -> Result<PathBuf, String> {
 async fn start_agent() -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     const DETACHED: u32 = 0x0000_0008 | 0x0800_0000; // DETACHED_PROCESS | CREATE_NO_WINDOW
+    // Already running (as the service or from an earlier start): nothing to do.
+    if blocking(|| client::send(&Request::Status).is_ok()).await? {
+        return Ok("Protection is already on.".into());
+    }
     std::process::Command::new(agent_exe()?)
         .arg("run")
         .creation_flags(DETACHED)
@@ -331,33 +336,68 @@ async fn start_agent() -> Result<String, String> {
     Ok("Protection started.".into())
 }
 
+/// State of the Syscura Windows service, read from `sc query`
+/// ("RUNNING", "STOPPED", ...), or None when it is not installed.
+fn service_state() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let out = std::process::Command::new(std::path::Path::new(&windir).join(r"System32\sc.exe"))
+        .args(["query", "Syscura"])
+        .creation_flags(0x0800_0000)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().find(|l| l.trim_start().starts_with("STATE"))?;
+    line.split_whitespace().nth(3).map(str::to_string)
+}
+
 /// Installs the agent as a Windows service (asks for admin rights once).
 #[tauri::command]
 async fn install_service() -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     let agent = agent_exe()?;
     blocking(move || {
+        if service_state().as_deref() == Some("RUNNING") {
+            return Ok("Syscura already runs as a Windows service.".to_string());
+        }
         // A console-mode agent holds the pipe; ask it to step aside first.
         let _ = client::send(&Request::Shutdown);
         std::thread::sleep(std::time::Duration::from_millis(800));
         let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let ps = std::path::Path::new(&windir).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
         // The path travels in an environment variable, never inside the script.
-        let status = std::process::Command::new(ps)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$p = Start-Process -FilePath $env:SYSCURA_AGENT -ArgumentList 'install' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode",
-            ])
+        // `install` replaces an existing service itself: one admin prompt.
+        let script = "Start-Process -FilePath $env:SYSCURA_AGENT -ArgumentList 'install' -Verb RunAs -WindowStyle Hidden -Wait";
+        let _ = std::process::Command::new(ps)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .env("SYSCURA_AGENT", &agent)
             .creation_flags(0x0800_0000)
             .status()
             .map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok("Syscura now runs as a Windows service and starts with Windows.".to_string())
-        } else {
-            Err("The service was not installed (the admin prompt was declined, or it is already installed).".to_string())
+        // Judge by what Windows reports, not by the helper's exit code.
+        for _ in 0..20 {
+            match service_state().as_deref() {
+                Some("RUNNING") => return Ok("Done. Syscura now runs as a Windows service and starts with Windows.".to_string()),
+                Some(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                None => break,
+            }
+        }
+        match service_state() {
+            Some(state) => Err(format!("The service was installed but is {}. Restart the PC, or open Services and start \"Syscura\".", state.to_lowercase())),
+            None => {
+                // Keep protection on for this session.
+                let _ = std::process::Command::new(&agent)
+                    .arg("run")
+                    .creation_flags(0x0000_0008 | 0x0800_0000)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                Err("The service was not installed: Windows' admin prompt was cancelled. Protection stays on until you sign out.".to_string())
+            }
         }
     })
     .await?
@@ -371,7 +411,9 @@ fn initial_view() -> Option<String> {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // Starting Syscura again opens the running copy's window.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_window(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
@@ -388,6 +430,11 @@ fn main() {
                 settings: Mutex::new(settings),
                 settings_path,
             });
+            tray::create(app.handle())?;
+            // `--tray` (used when Windows starts) stays in the tray.
+            if !std::env::args().any(|a| a == "--tray") {
+                tray::show_window(app.handle());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -413,6 +460,12 @@ fn main() {
             install_service,
             initial_view,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Syscura");
+        .build(tauri::generate_context!())
+        .expect("error while starting Syscura");
+    app.run(|_app, event| {
+        // Closing the window keeps Syscura in the tray; only "Quit" exits.
+        if let tauri::RunEvent::ExitRequested { api, code: None, .. } = event {
+            api.prevent_exit();
+        }
+    });
 }

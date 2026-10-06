@@ -3,6 +3,7 @@
   import { needsAttention } from "../lib/findings";
   import { nav } from "../lib/nav.svelte";
   import { api, ago, duration, gb, mb } from "../lib/api";
+  import { LINKS } from "../lib/links";
   import type { Finding, HardwareInfo, Sensor, StatusInfo } from "../lib/types";
 
   let {
@@ -180,7 +181,7 @@
 <footer class="footer">
   <span>
     {#if status}
-      Running in the background for {duration(status.uptime_secs)} · {mb(status.working_set_bytes)} of memory · watching {status.sensors.length} logs{#if !fromAgent} · drive temperature and wear appear once it runs as a service{/if}
+      {status.service ? "Protection runs as a Windows service" : "Protection runs for this session"} · on for {duration(status.uptime_secs)} · {mb(status.working_set_bytes)} of memory · watching {status.sensors.length} logs
     {:else}
       Background protection is off
     {/if}
@@ -188,11 +189,12 @@
   </span>
   <span class="right">
     {#if ai.status.configured}
-      <span>AI help: {ai.status.model} · {ai.status.auto_fix ? "fixes safe problems itself" : "suggests fixes"}</span>
+      <span>AI help on{ai.status.model ? ` (${ai.status.model})` : ""} · {ai.status.auto_fix ? "fixes safe problems itself" : "suggests fixes"}</span>
     {:else}
       <button class="link" onclick={onsettings}>Set up free AI help</button>
     {/if}
-    {#if status}<button class="link" disabled={agentBusy} onclick={() => agentAction(api.installService)}>Install as a Windows service</button>{/if}
+    {#if status && !status.service}<button class="link" disabled={agentBusy} onclick={() => agentAction(api.installService)}>Install as a Windows service</button>{/if}
+    <button class="link" onclick={() => api.open(LINKS.repo)}>GitHub</button>
   </span>
 </footer>
 

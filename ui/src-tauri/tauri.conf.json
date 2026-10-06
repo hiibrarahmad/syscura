@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Syscura",
-  "version": "0.1.0-beta.2",
+  "mainBinaryName": "Syscura",
+  "version": "0.1.0-beta.3",
   "identifier": "com.syscura.app",
   "build": {
     "frontendDist": "../dist",
@@ -13,6 +14,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Syscura",
         "width": 1400,
         "height": 880,
@@ -27,7 +29,36 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/syscura-agent",
+      "binaries/syscura-cli"
+    ],
+    "publisher": "Ibrar Ahmad",
+    "copyright": "Copyright (c) 2026 Ibrar Ahmad. MIT License.",
+    "homepage": "https://github.com/hiibrarahmad/syscura",
+    "shortDescription": "Syscura: PC health and safety guard",
+    "longDescription": "Watches Windows for software, hardware and security problems, explains them in plain language, and fixes what it safely can.",
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "./installer-hooks.nsh",
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Syscura"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    }
   }
 }

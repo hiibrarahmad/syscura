@@ -7,3 +7,7 @@ ui/dist/
 ui/src-tauri/gen/
 .vscode/
 *.log
+
+# Sidecars copied in by scripts/build-release.ps1
+ui/src-tauri/binaries/
+/dist/

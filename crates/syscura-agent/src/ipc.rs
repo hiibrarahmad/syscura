@@ -106,7 +106,19 @@ impl PipeSecurity {
 /// serves requests on a background thread.
 pub fn start(db_path: PathBuf, shared: Arc<Shared>) -> Result<(), String> {
     let security = PipeSecurity::new()?;
-    let first = security.create_instance(true)?;
+    // The service waits a little for a console agent that is still exiting
+    // (installing the service asks it to step aside); a console agent gives
+    // way at once, because then the service already has the pipe.
+    let attempts = if shared.console { 1 } else { 20 };
+    let mut first = security.create_instance(true);
+    for _ in 1..attempts {
+        if first.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        first = security.create_instance(true);
+    }
+    let first = first?;
     let first = first.0 as usize; // HANDLE is not Send; pass the raw value.
     std::thread::Builder::new()
         .name("ipc".into())
@@ -384,6 +396,7 @@ fn status(store: &Store, shared: &Shared) -> syscura_store::Result<StatusInfo> {
     Ok(StatusInfo {
         version: env!("CARGO_PKG_VERSION").into(),
         pid: std::process::id(),
+        service: !shared.console,
         uptime_secs: shared.started.elapsed().as_secs(),
         working_set_bytes,
         private_bytes,

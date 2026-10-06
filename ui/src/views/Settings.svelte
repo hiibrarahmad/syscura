@@ -1,6 +1,12 @@
 <script lang="ts">
   import { ai, refreshAi } from "../lib/ai.svelte";
   import { api } from "../lib/api";
+  import { LINKS } from "../lib/links";
+  import { onMount } from "svelte";
+  import type { StatusInfo } from "../lib/types";
+
+  let agent = $state<StatusInfo | null>(null);
+  onMount(() => { api.agentStatus().then((s) => (agent = s)).catch(() => {}); });
 
   let key = $state("");
   let busy = $state(false);
@@ -77,6 +83,37 @@
       <li>Free keys are subject to Google's terms; Google may use free-tier prompts to improve its products.</li>
     </ul>
   </section>
+
+  <section class="panel">
+    <span class="kicker">Background protection</span>
+    {#if agent}
+      <p><b>{agent.service ? "On, as a Windows service." : "On for this session only."}</b>
+        {agent.service ? "It starts with Windows by itself, even before you sign in." : "It stops when you sign out. Install the service so it starts with Windows."}</p>
+      <p class="muted">Syscura {agent.version} · using {(agent.working_set_bytes / 1048576).toFixed(1)} MB of memory · {agent.events_total.toLocaleString()} events recorded</p>
+      {#if !agent.service}<div class="btns"><button class="btn btn--sm" onclick={async () => { try { msg = { text: await api.installService() }; } catch (e) { msg = { text: String(e), bad: true }; } agent = await api.agentStatus().catch(() => agent); }}>Install as a Windows service</button></div>{/if}
+    {:else}
+      <p><b>Off.</b> Open the Overview page and press <b>Start</b>.</p>
+    {/if}
+    <p class="muted">Closing the window keeps Syscura in the taskbar tray (the ^ arrow next to the clock). Right-click its icon for <b>Quit</b>. Background protection keeps running either way.</p>
+  </section>
+
+  <section class="panel">
+    <span class="kicker">About and help</span>
+    <p>Syscura is free and open source (MIT). Made by <b>Ibrar Ahmad</b>.</p>
+    <div class="links">
+      <button class="btn btn--ghost btn--sm" onclick={() => api.open(LINKS.report)}>Report a problem</button>
+      <button class="btn btn--ghost btn--sm" onclick={() => api.open(LINKS.hardware)}>Wrong hardware info?</button>
+      <button class="btn btn--ghost btn--sm" onclick={() => api.open(LINKS.discussions)}>Ask a question</button>
+      <button class="btn btn--ghost btn--sm" onclick={() => api.open(LINKS.releases)}>Check for updates</button>
+      <button class="btn btn--ghost btn--sm" onclick={() => api.open(LINKS.repo)}>Source code</button>
+    </div>
+    <div class="links">
+      <button class="link" onclick={() => api.open(LINKS.github)}>GitHub · hiibrarahmad</button>
+      <button class="link" onclick={() => api.open(LINKS.linkedin)}>LinkedIn · Ibrar Ahmad</button>
+      <button class="link" onclick={() => api.open(LINKS.website)}>hiibrarahmad.github.io</button>
+    </div>
+    <p class="muted">If Syscura helped you, a ⭐ on GitHub helps others find it.</p>
+  </section>
 </div>
 
 <style>
@@ -92,6 +129,7 @@
   .okline { display: flex; align-items: center; gap: 8px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
   .btns { display: flex; gap: 8px; }
+  .links { display: flex; gap: 10px 18px; flex-wrap: wrap; align-items: center; }
   .msg { color: var(--ok); }
   .msg.bad { color: var(--danger); }
   .small { font-size: 13.5px; margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }

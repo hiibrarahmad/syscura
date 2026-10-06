@@ -11,7 +11,7 @@
   import Events from "./views/Events.svelte";
   import Settings from "./views/Settings.svelte";
   import Backup from "./views/Backup.svelte";
-  import { backupFirst, isCritical, notifyNew } from "./lib/warnings";
+  import { backupFirst, isCritical } from "./lib/warnings";
 
   type View = "overview" | "problems" | "hardware" | "events" | "backup" | "settings";
   let view = $state<View>("overview");
@@ -46,7 +46,6 @@
   async function refreshProblems() {
     try {
       findings = await api.findings(false);
-      notifyNew(findings);
       autoCheck(findings);
     } catch { findings = []; }
   }
@@ -64,6 +63,9 @@
     invoke<string | null>("initial_view").then((v) => {
       if (v === "overview" || v === "problems" || v === "hardware" || v === "events" || v === "backup" || v === "settings") view = v;
     }).catch(() => {});
+    // The tray menu's "Show problems".
+    const onView = (e: Event) => { const v = (e as CustomEvent<string>).detail; if (nav.some((n) => n.id === v)) go(v as View); };
+    window.addEventListener("syscura-view", onView);
     // Fresh hardware read on every start, so the report is always current.
     scan(true);
     refreshStatus();
@@ -73,7 +75,7 @@
     const b = setInterval(refreshSensors, 2000);
     // Automatic AI help: at most one problem a minute (free limits are small).
     const c = setInterval(() => autoStep(findings).then(refreshProblems), 60000);
-    return () => { clearInterval(a); clearInterval(b); clearInterval(c); };
+    return () => { clearInterval(a); clearInterval(b); clearInterval(c); window.removeEventListener("syscura-view", onView); };
   });
 
   const nav: { id: View; label: string }[] = [

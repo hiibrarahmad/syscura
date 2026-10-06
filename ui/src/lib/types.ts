@@ -7,6 +7,7 @@ export interface LevelCounts { critical: number; error: number; warning: number;
 export interface StatusInfo {
   version: string;
   pid: number;
+  service: boolean;
   uptime_secs: number;
   working_set_bytes: number;
   private_bytes: number;

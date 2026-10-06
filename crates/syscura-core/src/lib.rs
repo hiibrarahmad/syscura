@@ -88,6 +88,9 @@ pub struct LevelCounts {
 pub struct StatusInfo {
     pub version: String,
     pub pid: u32,
+    /// Running as the Windows service (not just for this session).
+    #[serde(default)]
+    pub service: bool,
     pub uptime_secs: u64,
     /// Physical RAM the agent occupies right now.
     pub working_set_bytes: u64,

@@ -75,6 +75,9 @@ fn run_service(data_dir: std::path::PathBuf) -> Result<(), String> {
     result
 }
 
+/// Installs and starts the service from this exe. An existing Syscura
+/// service (for example one pointing at an older copy in another folder)
+/// is replaced, so installing again is how you update or move Syscura.
 pub fn install() -> Result<(), String> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -82,6 +85,9 @@ pub fn install() -> Result<(), String> {
     )
     .map_err(|e| format!("cannot open the service manager (run as administrator): {e}"))?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS).is_ok() {
+        uninstall()?;
+    }
     let info = ServiceInfo {
         name: SERVICE_NAME.into(),
         display_name: DISPLAY_NAME.into(),
@@ -94,12 +100,25 @@ pub fn install() -> Result<(), String> {
         account_name: None, // LocalSystem
         account_password: None,
     };
-    let service = manager
-        .create_service(
-            &info,
-            ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::QUERY_STATUS,
-        )
-        .map_err(|e| format!("cannot create service: {e}"))?;
+    // A deleted service lingers until every handle to it is closed.
+    let mut created = None;
+    for _ in 0..50 {
+        match manager.create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::QUERY_STATUS) {
+            Ok(s) => {
+                created = Some(Ok(s));
+                break;
+            }
+            Err(e) => {
+                created = Some(Err(e));
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+    let service = match created {
+        Some(Ok(s)) => s,
+        Some(Err(e)) => return Err(format!("cannot create service: {e}")),
+        None => return Err("cannot create service".into()),
+    };
     let _ = service.set_description(DESCRIPTION);
     // Restart after 5 s, then 30 s, then 2 min; forget failures after a day.
     let restart = |secs| ServiceAction {

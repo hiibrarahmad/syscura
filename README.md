@@ -50,18 +50,29 @@ Windows logs thousands of warnings. Most are noise, a few really matter, and alm
 > [!NOTE]
 > Syscura is in **public beta**. It works well on the machines it was tested on, but it is young. Please [report anything odd](https://github.com/hiibrarahmad/syscura/issues/new/choose); it really helps.
 
-1. Download `Syscura-<version>-windows-x64.zip` from [**Releases**](https://github.com/hiibrarahmad/syscura/releases/latest).
-2. Unzip it somewhere you want to keep it (for example `C:\Program Files\Syscura`).
-3. Run **Syscura.exe** and press **Start**.
-4. Recommended: press **Install as a Windows service** so protection starts with Windows and can run fixes that need admin rights (one admin prompt).
+### Install (recommended)
 
-**Windows SmartScreen will warn you** the first time, because the beta is not code-signed yet (certificates cost money; free signing for open-source projects is planned). Click *More info → Run anyway*. You can check your download against the release:
+1. Download **`Syscura-<version>-setup.exe`** from [**Releases**](https://github.com/hiibrarahmad/syscura/releases/latest).
+2. Double-click it. Windows SmartScreen will warn you the first time, because the beta is not code-signed yet (certificates cost money; free signing for open-source projects is planned). Click **More info → Run anyway**, then **Yes** on the admin prompt.
+3. Click **Next → Install → Finish**. That's it:
+   - Syscura is installed in `C:\Program Files\Syscura`, with a Start menu entry and an uninstaller in *Settings → Apps*.
+   - **Background protection is set up as a Windows service** and starts with Windows, before anyone signs in.
+   - **The Syscura icon sits in the taskbar tray** (the **^** next to the clock) after every restart. Click it to open Syscura, right-click for the menu. Closing the window keeps it there.
+   - Serious problems pop up as Windows notifications, even when the window is closed.
+
+To update, run the newer setup over the old one; your history is kept. To remove Syscura, use *Settings → Apps → Syscura → Uninstall*: the service and auto-start are removed too. (Your history in `C:\ProgramData\Syscura` is kept; delete that folder for a clean slate.)
+
+### Portable (no install)
+
+Prefer not to install? Download `Syscura-<version>-windows-x64.zip`, unzip it anywhere, run **Syscura.exe** and press **Start**. Protection then runs until you sign out; press **Install as a Windows service** in Settings to make it permanent.
+
+You can check any download against the release:
 
 ```powershell
-Get-FileHash .\Syscura.exe -Algorithm SHA256   # compare with SHA256SUMS.txt in the release
+Get-FileHash .\Syscura-<version>-setup.exe -Algorithm SHA256   # compare with SHA256SUMS.txt
 ```
 
-Requirements: Windows 10 or 11, 64-bit. WebView2 is already part of Windows 11.
+Requirements: Windows 10 or 11, 64-bit, any PC or laptop. WebView2 is part of Windows 11; on Windows 10 the installer adds it if it is missing. Every release is tested automatically on clean Windows machines: the hardware scan and the agent on Windows Server 2022 and 2025, and the full install, service start and uninstall on Windows Server 2022.
 
 ## What it finds
 
@@ -158,8 +169,8 @@ git clone https://github.com/hiibrarahmad/syscura
 cd syscura
 cd ui; npm ci; npm run build; cd ..
 cargo test --workspace
-cd ui; npx tauri build --no-bundle
-# binaries: target\release\syscura-ui.exe, syscura-agent.exe, syscura-cli.exe
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
+# dist\Syscura-<version>-setup.exe, the portable zip and SHA256SUMS.txt
 ```
 
 ## Roadmap
@@ -201,7 +212,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines.
 
 <div align="center">
 
-Made by **[Hiibrarahmad](https://github.com/hiibrarahmad)** · MIT licensed
+Made by **Ibrar Ahmad** · [GitHub](https://github.com/hiibrarahmad) · [LinkedIn](https://www.linkedin.com/in/hiibrarahmad/) · [Website](https://hiibrarahmad.github.io/) · MIT licensed
 
 If Syscura helped you understand or fix your PC, a ⭐ helps others find it.
 

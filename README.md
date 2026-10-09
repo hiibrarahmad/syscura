@@ -49,8 +49,15 @@ Windows logs thousands of warnings. Most are noise, a few really matter, and alm
 | 🪶 **Tiny** | The background agent uses **~13 MB of RAM and 0% CPU when idle**. It sleeps until Windows reports something. The window only runs while you look at it. |
 
 <p align="center">
+  <img src="docs/screenshots/problems.png" alt="Syscura Problems: problems grouped into Needs you, Fixed and Safe to ignore, with a detail panel saying what happened, whether it is harmful, what to do, and safe fixes" width="445" />
+  <img src="docs/screenshots/security.png" alt="Syscura Security: a score out of 100 from Windows' own settings, with each protection explained and one-click fixes such as turning the firewall on" width="445" />
+</p>
+
+<p align="center">
   <img src="docs/screenshots/hardware.png" alt="Syscura Hardware: parts found, This PC with Windows 11 Pro 25H2 build, BIOS and Secure Boot, and a detailed card for every part" width="900" />
 </p>
+
+<sub>Screenshots use demo data, so no real user's PC is shown.</sub>
 
 ## Download
 

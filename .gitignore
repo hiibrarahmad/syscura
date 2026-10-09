@@ -11,3 +11,13 @@ ui/src-tauri/gen/
 # Sidecars copied in by scripts/build-release.ps1
 ui/src-tauri/binaries/
 /dist/
+
+# Demo video and other large media (published on LinkedIn, not in git)
+/media/
+
+# Demo recordings
+scripts/demo/node_modules/
+scripts/demo/frames/
+scripts/demo/clips/
+scripts/demo/readme/
+scripts/demo/*.mp4

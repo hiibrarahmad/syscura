@@ -1,0 +1,9 @@
+{
+  "name": "syscura-demo",
+  "private": true,
+  "description": "Records Syscura's demo video and README screenshots from the real UI with demo data",
+  "type": "module",
+  "devDependencies": {
+    "playwright": "^1.64.0"
+  }
+}

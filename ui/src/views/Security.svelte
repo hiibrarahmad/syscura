@@ -23,7 +23,7 @@
     busy[c.id] = true;
     try {
       const m = await api.applyAction({ finding: null, title: c.title, action: c.action, params: {}, label: c.action_label, automatic: false });
-      msg[c.id] = { text: `${m} Syscura checks again in a moment.` };
+      msg[c.id] = { text: `${m.replace(/[.\s]*$/, ".")} Syscura checks again in a moment.` };
       setTimeout(() => load(true), 6000);
     } catch (e) {
       msg[c.id] = { text: String(e), bad: true };

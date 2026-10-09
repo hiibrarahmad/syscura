@@ -1,0 +1,212 @@
+# Builds a release on GitHub's machines, never on a developer PC, so anyone
+# can see exactly how each file was made (SignPath's free code signing for
+# open source requires this).
+#
+#   git tag v1.1.0 && git push origin v1.1.0   -> builds, tests, creates a DRAFT release
+#   Actions -> Release -> Run workflow          -> builds and tests only (no release)
+#
+# Code signing (optional until SignPath approves the project): set the
+# repository variable SIGNPATH_ORGANIZATION_ID and the secret
+# SIGNPATH_API_TOKEN. Without them the files are built unsigned. See
+# docs/code-signing.md.
+#
+# Update signature (required for a release): the secret
+# TAURI_SIGNING_PRIVATE_KEY holds the minisign key whose public half is in
+# ui/src-tauri/src/update.rs. The app refuses updates without it.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            triple: x86_64-pc-windows-msvc
+          - arch: arm64
+            os: windows-11-arm
+            triple: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.arch }}
+
+      - name: Build the programs
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Arch ${{ matrix.arch }} -Stage binaries
+
+      # ---- code signing: the three programs, then the installer around them
+      - name: Collect the programs for signing
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force unsigned-programs | Out-Null
+          Copy-Item target\${{ matrix.triple }}\release\Syscura.exe, target\${{ matrix.triple }}\release\syscura-agent.exe, target\${{ matrix.triple }}\release\syscura-cli.exe unsigned-programs
+      - id: programs
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-programs-${{ matrix.arch }}
+          path: unsigned-programs
+      - name: Sign the programs (SignPath)
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: syscura
+          signing-policy-slug: ${{ startsWith(github.ref, 'refs/tags/v') && 'release-signing' || 'test-signing' }}
+          artifact-configuration-slug: programs
+          github-artifact-id: ${{ steps.programs.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-programs
+      - name: Use the signed programs
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: Copy-Item signed-programs\*.exe target\${{ matrix.triple }}\release\ -Force
+
+      - name: Build the installer
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Arch ${{ matrix.arch }} -Stage bundle
+
+      - name: Collect the installer for signing
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force unsigned-installer | Out-Null
+          Copy-Item target\${{ matrix.triple }}\release\bundle\nsis\*.exe unsigned-installer
+      - id: installer
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer-${{ matrix.arch }}
+          path: unsigned-installer
+      - name: Sign the installer (SignPath)
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: syscura
+          signing-policy-slug: ${{ startsWith(github.ref, 'refs/tags/v') && 'release-signing' || 'test-signing' }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-installer
+      - name: Use the signed installer
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: Copy-Item signed-installer\*.exe target\${{ matrix.triple }}\release\bundle\nsis\ -Force
+
+      - name: Package
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Arch ${{ matrix.arch }} -Stage package
+
+      # ---- the release files must install, run and uninstall on a clean machine
+      - name: Install, check and uninstall (${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist\*setup*.exe | Select-Object -First 1
+          "Installing $($setup.Name)"
+          if ($env:SIGN -eq 'true') {
+            $sig = Get-AuthenticodeSignature $setup.FullName
+            "Signature: $($sig.Status) by $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "the installer is not validly signed" }
+          }
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          $ok = $false
+          foreach ($i in 1..30) { Start-Sleep 2; & "C:\Program Files\Syscura\syscura-cli.exe" status; if ($LASTEXITCODE -eq 0) { $ok = $true; break } }
+          if (-not $ok) { throw "the service did not answer" }
+          & "C:\Program Files\Syscura\syscura-agent.exe" hwscan | ConvertFrom-Json | ForEach-Object { "CPU: $($_.cpus[0].name) · Windows $($_.os.build) · $($_.os.architecture)" }
+          Start-Process "C:\Program Files\Syscura\uninstall.exe" -ArgumentList '/S' -Wait
+          Start-Sleep 5
+          if (Get-Service Syscura -ErrorAction SilentlyContinue) { throw "service left behind" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Remove-Item dist\SHA256SUMS* -ErrorAction SilentlyContinue
+          Get-ChildItem dist -File | Sort-Object Name | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content dist\SHA256SUMS.txt -Encoding ascii
+          Get-Content dist\SHA256SUMS.txt
+      - name: Sign the checksums (the app checks this before installing an update)
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is not set: updates would be refused" }
+          Push-Location ui
+          npm ci
+          npx tauri signer sign -k "$env:TAURI_SIGNING_PRIVATE_KEY" -p "" ..\dist\SHA256SUMS.txt
+          Pop-Location
+          if (-not (Test-Path dist\SHA256SUMS.txt.sig)) { throw "no signature was written" }
+      - name: winget manifests
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\winget-manifest.ps1 -Tag "${{ github.ref_name }}" -Dist dist -Out winget
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifests
+          path: winget
+      - name: Draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          # Release notes: this version's section of the changelog.
+          $log = Get-Content CHANGELOG.md -Raw
+          $m = [regex]::Match($log, "(?ms)^## $([regex]::Escape($version))\s*$(.*?)(?=^## )")
+          $notes = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "Syscura $version" }
+          Set-Content notes.md $notes -Encoding utf8
+          $flags = @('--draft', '--title', "Syscura $version", '--notes-file', 'notes.md')
+          if ($version -match '-') { $flags += '--prerelease' }
+          gh release create $tag @flags (Get-ChildItem dist -File).FullName
+          "Draft release created. Check it, then publish it on GitHub."

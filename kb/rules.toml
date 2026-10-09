@@ -617,3 +617,347 @@ event_ids = [11]
 action = "defender.full_scan"
 label = "Run a Defender full scan (takes a while)"
 risk = "caution"
+
+# ---------------------------------------------------------------- more startup tricks
+
+[[rule]]
+id = "sec.debugger_hijack"
+title = "Another program runs whenever a program starts"
+category = "security"
+severity = "error"
+harmful = "maybe"
+group_by = "Program"
+explain = "Whenever {Program} starts, Windows runs {Runs} instead, through {How}. Developers and some tools use this, but malware uses it to start itself or to stop security tools from opening. On the sign-in screen's accessibility programs (sethc.exe, utilman.exe) it is a well-known backdoor."
+advice = "If you did not set this up, remove it: Registry Editor → HKLM → SOFTWARE → Microsoft → Windows NT → CurrentVersion → Image File Execution Options → {Program}, delete the Debugger value. Then run a Defender full scan."
+search = "Image File Execution Options Debugger {Program} malware"
+[rule.match]
+channel = "Syscura/Startup"
+event_ids = [12]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+[[rule]]
+id = "sec.winlogon"
+title = "Windows' sign-in programs were changed"
+category = "security"
+severity = "error"
+harmful = "maybe"
+group_by = "Setting"
+explain = "The {Setting} setting ({Scope}) is \"{Value}\" instead of Windows' own program. Malware adds itself here so it runs every time someone signs in."
+advice = "Unless this PC is a kiosk or uses a custom shell on purpose, run a Defender full scan and a Defender Offline scan, then set it back to explorer.exe (Shell) or userinit.exe in System32 (Userinit)."
+search = "Winlogon {Setting} value changed malware"
+[rule.match]
+channel = "Syscura/Startup"
+event_ids = [13]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+[[rule.fix]]
+action = "defender.offline_scan"
+label = "Defender Offline scan (restarts the PC, finds hidden malware)"
+risk = "risky"
+auto = false
+
+[[rule]]
+id = "sec.appinit"
+title = "A DLL is loaded into every program (AppInit_DLLs)"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "Dlls"
+explain = "Windows is told to load {Dlls} into every {Bits} program that shows a window. A few old programs did this; today it is mostly malware and adware."
+advice = "If you do not recognise the file, scan it with Defender and remove the AppInit_DLLs value."
+search = "AppInit_DLLs {Dlls}"
+[rule.match]
+channel = "Syscura/Startup"
+event_ids = [14]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+[[rule]]
+id = "sec.wmi_persistence"
+title = "A hidden WMI task runs commands"
+category = "security"
+severity = "error"
+harmful = "maybe"
+group_by = "Name"
+explain = "A WMI event subscription called \"{Name}\" {Kind}: {Runs}. This file-less way to start programs does not show up in Task Manager or Task Scheduler; advanced malware likes it, though a few management tools use it."
+advice = "If you do not know \"{Name}\", run a Defender full scan and search the web for the name. Removing it needs PowerShell as administrator (Get-CimInstance -Namespace root/subscription)."
+search = "WMI event consumer \"{Name}\" malware"
+[rule.match]
+channel = "Syscura/Startup"
+event_ids = [15]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+[[rule]]
+id = "sec.service_user"
+title = "An unsigned service runs from a user folder"
+category = "security"
+severity = "error"
+harmful = "maybe"
+group_by = "Path"
+explain = "The \"{Service}\" service runs {Path} with full system rights, and the file has no valid signature ({Signature}). Real services live in Program Files or Windows; one in a user, Temp or ProgramData folder is a strong malware sign."
+advice = "If you do not recognise it, scan the file with Defender and disable the service."
+search = "\"{Service}\" service is it malware"
+[rule.match]
+channel = "Syscura/Startup"
+event_ids = [16]
+[[rule.fix]]
+action = "defender.scan_path"
+label = "Scan this file with Defender"
+risk = "safe"
+params = { path = "{Path}" }
+[[rule.fix]]
+action = "service.disable"
+label = "Disable this service"
+risk = "risky"
+params = { service = "{Service}" }
+
+# ---------------------------------------------------------------- network tampering
+
+[[rule]]
+id = "net.hosts_security"
+title = "The hosts file blocks a security or update site"
+category = "security"
+severity = "error"
+harmful = "maybe"
+group_by = "Host"
+explain = "Windows' hosts file ({Path}) sends {Host} to {Address}, so it {Why}. Malware does this so Windows Update and antivirus can no longer update or clean it."
+advice = "Unless you added this line yourself, open Notepad as administrator, remove the line for {Host} from the hosts file, then run a Defender full scan."
+search = "hosts file {Host} blocked malware"
+[rule.match]
+channel = "Syscura/Network"
+event_ids = [20]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+[[rule]]
+id = "net.hosts_redirect"
+title = "The hosts file sends a popular site somewhere else"
+category = "security"
+severity = "error"
+harmful = "yes"
+group_by = "Host"
+explain = "Windows' hosts file ({Path}) sends {Host} to {Address} instead of the real site. This is how fake sign-in pages steal passwords."
+advice = "Do not sign in to {Host} until this is fixed. Remove the line from the hosts file (Notepad as administrator), run a Defender full scan, and change your password from another device if you signed in recently."
+search = "hosts file redirect {Host} phishing"
+[rule.match]
+channel = "Syscura/Network"
+event_ids = [21]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+[[rule.fix]]
+action = "dns.flush"
+label = "Clear the DNS cache (after fixing the hosts file)"
+risk = "safe"
+auto = false
+
+[[rule]]
+id = "net.proxy"
+title = "Internet traffic goes through a proxy"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "Proxy"
+explain = "Traffic of {Scope} is sent through {Proxy}. Workplaces, VPNs and ad blockers set proxies; some malware does it to watch or change what you browse."
+advice = "If you do not use a VPN, work proxy or filtering tool, turn it off in Settings → Network & internet → Proxy and run a Defender full scan."
+search = "Windows proxy set by itself {Proxy}"
+[rule.match]
+channel = "Syscura/Network"
+event_ids = [22]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+[[rule]]
+id = "net.dns_unknown"
+title = "An unknown DNS server is set by hand"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "Server"
+explain = "Website names are looked up through {Server} ({Family}), which was typed into the network settings and is not a well-known public DNS service. Changing DNS is how some malware sends people to fake sites."
+advice = "If you or your workplace did not choose this server, set DNS back to automatic (Settings → Network & internet → your connection → DNS server assignment: Automatic) and run a Defender full scan."
+search = "DNS server {Server}"
+[rule.match]
+channel = "Syscura/Network"
+event_ids = [23]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+[[rule]]
+id = "net.forced_extension"
+title = "A browser extension is forced on"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "Extension"
+explain = "A policy ({Scope}) makes {Browser} install the extension {Extension} from {Source}, and it cannot be removed in the browser. Workplaces do this; so does adware that reads everything you browse."
+advice = "If this is not a work PC, search the extension id to see what it is. To remove it, delete it from the ExtensionInstallForcelist policy in the registry and run a Defender full scan."
+search = "{Browser} extension {Extension}"
+[rule.match]
+channel = "Syscura/Network"
+event_ids = [24]
+[[rule.fix]]
+action = "defender.full_scan"
+label = "Run a Defender full scan (takes a while)"
+risk = "caution"
+
+# ---------------------------------------------------------------- drivers
+
+[[rule]]
+id = "drv.vulnerable"
+title = "A driver with a known security hole is installed"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "Path"
+explain = "{Path} ({KnownAs}, service \"{Service}\", loads {Loads}) is on the LOLDrivers list of drivers with known security holes. Malware can load such a driver to switch off antivirus and take over Windows. Usually an old hardware, overclocking or anti-cheat tool installed it."
+advice = "Update or uninstall the program that installed it (its folder and the service name say which). Microsoft's vulnerable driver blocklist (Security page) stops most of these drivers from loading."
+search = "{KnownAs} vulnerable driver"
+[rule.match]
+channel = "Syscura/Drivers"
+event_ids = [30]
+[[rule.fix]]
+action = "driverblocklist.enable"
+label = "Turn on Microsoft's vulnerable driver blocklist"
+risk = "caution"
+
+[[rule]]
+id = "drv.malicious"
+title = "A known malicious driver is installed"
+category = "security"
+severity = "critical"
+harmful = "yes"
+group_by = "Path"
+explain = "{Path} ({KnownAs}, service \"{Service}\", loads {Loads}) is a driver known to belong to malware (LOLDrivers list). Drivers run inside Windows itself, below antivirus."
+advice = "Run a Defender Offline scan now. If Defender cannot remove it, back up your files and reinstall Windows."
+search = "{KnownAs} malicious driver"
+[rule.match]
+channel = "Syscura/Drivers"
+event_ids = [31]
+[[rule.fix]]
+action = "defender.scan_path"
+label = "Scan this file with Defender"
+risk = "safe"
+params = { path = "{Path}" }
+[[rule.fix]]
+action = "defender.offline_scan"
+label = "Defender Offline scan (restarts the PC, finds hidden malware)"
+risk = "risky"
+auto = false
+
+# ---------------------------------------------------------------- ransomware tripwire
+
+[[rule]]
+id = "sec.ransomware"
+title = "Files are being encrypted (ransomware tripwire)"
+category = "security"
+severity = "critical"
+harmful = "yes"
+group_by = "Folder"
+explain = "Syscura's hidden tripwire file in {Folder} ({User}): {What}. Nothing should touch it; ransomware encrypts every file it finds, so files are probably being encrypted right now."
+advice = "Act now: disconnect from the internet (Wi-Fi off, cable out) and unplug backup drives. Do not restart. Let Defender scan, and check Task Manager for programs you do not know. If many files already have strange extensions, get professional help before paying anything."
+search = "ransomware what to do first steps"
+[rule.match]
+channel = "Syscura/Ransomware"
+event_ids = [40]
+[[rule.fix]]
+action = "defender.quick_scan"
+label = "Defender quick scan"
+risk = "safe"
+[[rule.fix]]
+action = "defender.enable_cfa"
+label = "Turn on Controlled folder access (blocks unknown programs from your files)"
+risk = "caution"
+
+[[rule]]
+id = "sec.canary_gone"
+title = "A ransomware tripwire file was deleted"
+category = "security"
+severity = "warning"
+harmful = "maybe"
+group_by = "Folder"
+explain = "Syscura's hidden tripwire file in {Folder} ({User}) was deleted. A clean-up tool or a person may have removed it; Syscura put it back."
+advice = "If you deleted it, press Mark as safe. If it keeps disappearing, run a Defender full scan."
+[rule.match]
+channel = "Syscura/Ransomware"
+event_ids = [41]
+
+# ---------------------------------------------------------------- drive health over time
+
+[[rule]]
+id = "disk.wear_fast"
+title = "A drive is wearing out quickly"
+category = "hardware"
+severity = "warning"
+harmful = "maybe"
+group_by = "Disk"
+explain = "{Disk}: {Detail} A program writing constantly (a misconfigured download or backup, or a game cache) usually causes this."
+advice = "Check Task Manager's Disk column for programs writing all the time, and keep a current backup."
+search = "SSD wear increasing fast Windows"
+[rule.match]
+channel = "Syscura/Disks"
+event_ids = [50]
+
+[[rule]]
+id = "disk.worn"
+title = "A drive is near the end of its rated life"
+category = "hardware"
+severity = "error"
+harmful = "yes"
+group_by = "Disk"
+explain = "{Disk}: {Detail} Drives often keep working past 100%, but failure becomes more likely."
+advice = "Back up now and plan to replace the drive."
+search = "SSD percentage used 90 replace"
+[rule.match]
+channel = "Syscura/Disks"
+event_ids = [51]
+
+[[rule]]
+id = "disk.hot"
+title = "A drive runs hot"
+category = "hardware"
+severity = "warning"
+harmful = "maybe"
+group_by = "Disk"
+explain = "{Disk}: {Detail} Above about 70 °C drives slow themselves down and age faster."
+advice = "Check the PC's airflow and fans; an NVMe drive may need a heatsink."
+search = "NVMe SSD temperature too high"
+[rule.match]
+channel = "Syscura/Disks"
+event_ids = [52]
+
+[[rule]]
+id = "disk.health_dropped"
+title = "A drive's health got worse"
+category = "hardware"
+severity = "error"
+harmful = "yes"
+group_by = "Disk"
+explain = "{Disk}: {Detail}"
+advice = "Back up your files now. Then check the drive with its maker's tool and replace it if it keeps failing."
+search = "Windows disk health warning unhealthy"
+[rule.match]
+channel = "Syscura/Disks"
+event_ids = [53]
+[[rule.fix]]
+action = "chkdsk.scan"
+label = "Check drive C: (read-only)"
+risk = "safe"
+auto = false

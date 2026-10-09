@@ -8,11 +8,18 @@
 
 mod actions;
 mod agent;
+mod caller;
+mod canary;
+mod checks;
+mod dbsafe;
+mod disks;
 mod hardware;
 mod heal;
 mod ipc;
 mod log;
 mod meminfo;
+mod posture;
+mod reg;
 mod service;
 mod trust;
 mod watch;

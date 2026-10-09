@@ -4,7 +4,7 @@
   import { LINKS } from "../lib/links";
   import SocialLinks from "../lib/SocialLinks.svelte";
   import { onMount } from "svelte";
-  import type { StatusInfo } from "../lib/types";
+  import type { Prefs, StatusInfo } from "../lib/types";
 
   let agent = $state<StatusInfo | null>(null);
   type Update = Awaited<ReturnType<typeof api.updateCheck>>;
@@ -21,7 +21,14 @@
     updMsg = { text: "Downloading the update and checking it…" };
     try { updMsg = { text: await api.updateInstall() }; } catch (e) { updMsg = { text: String(e), bad: true }; updBusy = false; }
   }
+  let prefs = $state<Prefs | null>(null);
+  async function setPref(change: Partial<Prefs>) {
+    if (!prefs) return;
+    const next = { ...prefs, ...change };
+    try { await api.setAppPrefs(next); prefs = next; } catch (e) { updMsg = { text: String(e), bad: true }; }
+  }
   onMount(() => {
+    api.appPrefs().then((p) => (prefs = p)).catch(() => {});
     api.agentStatus().then((s) => (agent = s)).catch(() => {});
     checkUpdate(false);
   });
@@ -119,19 +126,29 @@
     <span class="kicker">Updates</span>
     {#if upd?.available}
       <p><b>Syscura {upd.latest} is available.</b> You have {upd.current}.{upd.published ? ` Released ${upd.published}.` : ""}</p>
-      <p class="muted">Syscura downloads it from GitHub, checks it against the published checksum, and installs it over this copy (one admin prompt). Your history, verdicts, settings and AI key are kept, and Syscura opens again when it is done.</p>
+      <p class="muted">Syscura downloads it from GitHub, checks Syscura's signature and the published checksum, and installs it over this copy (one admin prompt). Your history, verdicts, settings and AI key are kept, and Syscura opens again when it is done.</p>
       <div class="btns">
         <button class="btn btn--sm" disabled={updBusy} onclick={installUpdate}>{updBusy ? "Working…" : `Download and install ${upd.latest}`}</button>
         <button class="btn btn--ghost btn--sm" onclick={() => api.open(upd!.page)}>What's new</button>
       </div>
     {:else if upd}
       <p><b>You have the latest version</b> ({upd.current}).</p>
-      <p class="muted">Syscura checks GitHub once a day and tells you when there is a new version.</p>
+      <p class="muted">{prefs?.auto_update_check === false ? "Automatic checks are off; press Check now when you like." : "Syscura checks GitHub once a day and tells you when there is a new version."}</p>
       <div class="btns"><button class="btn btn--ghost btn--sm" disabled={updBusy} onclick={() => checkUpdate(true)}>{updBusy ? "Checking…" : "Check now"}</button></div>
     {:else}
       <div class="btns"><button class="btn btn--ghost btn--sm" disabled={updBusy} onclick={() => checkUpdate(true)}>{updBusy ? "Checking…" : "Check for updates"}</button></div>
     {/if}
     {#if updMsg}<p class:bad={updMsg.bad} class="msg">{updMsg.text}</p>{/if}
+    {#if prefs}
+      <label class="check">
+        <input type="checkbox" checked={prefs.auto_update_check} onchange={(e) => setPref({ auto_update_check: (e.currentTarget as HTMLInputElement).checked })} />
+        <span><b>Check for updates once a day.</b> Syscura asks GitHub for the latest version number; nothing about your PC is sent. Updates are only installed when you press the button, and only if they carry Syscura's signature.</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" checked={prefs.weekly_summary} onchange={(e) => setPref({ weekly_summary: (e.currentTarget as HTMLInputElement).checked })} />
+        <span><b>Weekly summary.</b> One notification a week: what Syscura found and fixed.</span>
+      </label>
+    {/if}
   </section>
 
   <section class="panel">

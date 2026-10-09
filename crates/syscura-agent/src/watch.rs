@@ -24,14 +24,12 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-use windows::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SAM_FLAGS, REG_SZ,
-    REG_VALUE_TYPE, RegCloseKey, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW,
-};
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::core::{HSTRING, PWSTR};
+
+use crate::reg::{self, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_WOW64_32KEY, VIEW64 as KEY_WOW64_64KEY};
 
 use crate::agent::Msg;
 use crate::trust::{self, Location, Signature};
@@ -85,11 +83,42 @@ pub struct Watch {
     /// CPU time per process at the previous listing, for CPU %.
     cpu_prev: Mutex<(Option<Instant>, HashMap<u32, u64>)>,
     last_viewed: Mutex<Option<Instant>>,
+    /// Driver file hashes, so unchanged drivers are not read again.
+    pub drivers: crate::checks::DriverCache,
+    /// The latest security settings check.
+    pub security: Mutex<Option<syscura_core::SecurityReport>>,
+    security_busy: Mutex<bool>,
 }
 
 impl Watch {
     pub fn defender(&self) -> Option<DefenderInfo> {
         lock(&self.defender).clone()
+    }
+
+    /// The latest security settings check. A new check (when asked, or
+    /// when there is none yet) runs on its own thread, so the pipe stays
+    /// free; the answer says `refreshing` until it is done.
+    pub fn security(self: &Arc<Self>, refresh: bool) -> syscura_core::SecurityReport {
+        let current = lock(&self.security).clone();
+        if !refresh && let Some(r) = current {
+            return r;
+        }
+        let mut busy = lock(&self.security_busy);
+        if !*busy {
+            *busy = true;
+            let me = self.clone();
+            let spawned = std::thread::Builder::new().name("security".into()).stack_size(512 * 1024).spawn(move || {
+                let r = crate::posture::report(me.defender().or_else(defender_status));
+                *lock(&me.security) = Some(r);
+                *lock(&me.security_busy) = false;
+            });
+            if spawned.is_err() {
+                *busy = false;
+            }
+        }
+        let mut r = current.unwrap_or_default();
+        r.refreshing = true;
+        r
     }
 
     /// Every running program with details. Memory and CPU are read now,
@@ -145,7 +174,7 @@ impl Watch {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -251,6 +280,8 @@ fn run(watch: &Watch, tx: &Sender<Msg>) {
         }
         if started.elapsed() > Duration::from_secs(60) && last_startup_scan.is_none_or(|t| t.elapsed() >= STARTUP_SCAN_EVERY) {
             startup_scan(tx);
+            crate::checks::scan_all(tx, &watch.drivers);
+            *lock(&watch.security) = Some(crate::posture::report(watch.defender()));
             last_startup_scan = Some(Instant::now());
         }
         std::thread::sleep(POLL);
@@ -263,12 +294,12 @@ fn set_warning(watch: &Watch, pid: u32, text: &str) {
     }
 }
 
-fn is_program(path: &str) -> bool {
+pub(crate) fn is_program(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     [".exe", ".scr", ".com", ".pif"].iter().any(|e| p.ends_with(e))
 }
 
-fn emit<const N: usize>(tx: &Sender<Msg>, channel: &str, event_id: u32, level: Level, key: &str, data: [(&str, String); N]) {
+pub(crate) fn emit<const N: usize>(tx: &Sender<Msg>, channel: &str, event_id: u32, level: Level, key: &str, data: [(&str, String); N]) {
     // Stable record ids: the same finding is not stored twice.
     let record_id = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
     let _ = tx.send(Msg::Event(Event {
@@ -479,7 +510,7 @@ fn startup_scan(tx: &Sender<Msg>) {
     log::info(&format!("checked programs that start with Windows: {flagged} unsigned in user folders"));
 }
 
-fn expand(s: &str) -> String {
+pub(crate) fn expand(s: &str) -> String {
     use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
     let src = HSTRING::from(s);
     let mut buf = vec![0u16; 2048];
@@ -499,17 +530,14 @@ fn startup_items() -> Vec<StartupItem> {
         (run, KEY_WOW64_32KEY, "Run key (all users, 32-bit)"),
         (run_once, KEY_WOW64_64KEY, "RunOnce key (all users)"),
     ] {
-        for (name, cmd) in reg_values(HKEY_LOCAL_MACHINE, key, view) {
+        for (name, cmd) in reg::values(HKEY_LOCAL_MACHINE, key, view) {
             out.push(StartupItem { name, place: place.into(), command: cmd });
         }
     }
     // Every signed-in user's own Run keys.
-    for sid in reg_subkeys(HKEY_USERS, "") {
-        if sid.ends_with("_Classes") || sid == ".DEFAULT" || !sid.starts_with("S-1-5-21-") {
-            continue;
-        }
+    for sid in reg::user_sids() {
         for (key, place) in [(run, "Run key (user)"), (run_once, "RunOnce key (user)")] {
-            for (name, cmd) in reg_values(HKEY_USERS, &format!(r"{sid}\{key}"), KEY_WOW64_64KEY) {
+            for (name, cmd) in reg::values(HKEY_USERS, &format!(r"{sid}\{key}"), KEY_WOW64_64KEY) {
                 out.push(StartupItem { name, place: place.into(), command: cmd });
             }
         }
@@ -596,63 +624,6 @@ fn unescape(s: &str) -> String {
     s.replace("&quot;", "\"").replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 }
 
-fn reg_open(root: HKEY, path: &str, view: REG_SAM_FLAGS) -> Option<HKEY> {
-    let mut key = HKEY::default();
-    let r = unsafe { RegOpenKeyExW(root, &HSTRING::from(path), Some(0), KEY_READ | view, &mut key) };
-    r.is_ok().then_some(key)
-}
-
-fn reg_subkeys(root: HKEY, path: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let key = if path.is_empty() { root } else { match reg_open(root, path, KEY_WOW64_64KEY) { Some(k) => k, None => return out } };
-    for i in 0.. {
-        let mut buf = [0u16; 256];
-        let mut len = buf.len() as u32;
-        let r = unsafe { RegEnumKeyExW(key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None) };
-        if r.is_err() {
-            break;
-        }
-        out.push(String::from_utf16_lossy(&buf[..len as usize]));
-    }
-    if !path.is_empty() {
-        unsafe {
-            let _ = RegCloseKey(key);
-        }
-    }
-    out
-}
-
-/// String values of a key: (name, data).
-fn reg_values(root: HKEY, path: &str, view: REG_SAM_FLAGS) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let Some(key) = reg_open(root, path, view) else { return out };
-    for i in 0..500 {
-        let mut name = [0u16; 512];
-        let mut name_len = name.len() as u32;
-        let mut data = vec![0u8; 8192];
-        let mut data_len = data.len() as u32;
-        let mut kind = 0u32;
-        let r = unsafe {
-            RegEnumValueW(key, i, Some(PWSTR(name.as_mut_ptr())), &mut name_len, None, Some(&mut kind as *mut u32), Some(data.as_mut_ptr()), Some(&mut data_len))
-        };
-        if r.is_err() {
-            break;
-        }
-        if REG_VALUE_TYPE(kind) != REG_SZ && REG_VALUE_TYPE(kind) != REG_EXPAND_SZ {
-            continue;
-        }
-        let words: Vec<u16> = data[..data_len as usize].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
-        let text = String::from_utf16_lossy(&words).trim_end_matches('\0').trim().to_string();
-        if !text.is_empty() {
-            out.push((String::from_utf16_lossy(&name[..name_len as usize]), text));
-        }
-    }
-    unsafe {
-        let _ = RegCloseKey(key);
-    }
-    out
-}
-
 /// One pass of every check, printed: `syscura-agent selftest`. Changes
 /// nothing; used to try Syscura's own checks on a machine (and in CI).
 pub fn self_test() {
@@ -689,15 +660,32 @@ pub fn self_test() {
         }
     }
     let _ = fresh;
-    match defender_status() {
+    let defender = defender_status();
+    match &defender {
         Some(d) => println!("defender: {}", serde_json::to_string(&d).unwrap_or_default()),
         None => println!("defender: status not available"),
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = Instant::now();
+    crate::checks::scan_all(&tx, &crate::checks::DriverCache::default());
+    println!("persistence, network and driver checks took {} ms", t.elapsed().as_millis());
+    drop(tx);
+    for msg in rx.try_iter() {
+        if let Msg::Event(e) = msg {
+            println!("  warning {} #{}: {:?}", e.channel, e.event_id, e.data);
+        }
+    }
+    let t = Instant::now();
+    let report = crate::posture::report(defender);
+    println!("security score {} ({} ms)", report.score, t.elapsed().as_millis());
+    for c in &report.checks {
+        println!("  [{}] {}: {}", c.status, c.title, c.detail);
     }
 }
 
 // --------------------------------------------------------------- Defender
 
-fn defender_status() -> Option<DefenderInfo> {
+pub(crate) fn defender_status() -> Option<DefenderInfo> {
     let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let ps = PathBuf::from(windir).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
     let script = "$s = Get-MpComputerStatus -ErrorAction Stop; \

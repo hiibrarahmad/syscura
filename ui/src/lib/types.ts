@@ -120,3 +120,17 @@ export interface Analysis {
   actions: ProposedAction[]; sources: { title: string; url: string }[]; model: string;
 }
 export interface AiStatus { configured: boolean; model: string | null; auto_fix: boolean }
+
+export interface SecurityCheck {
+  id: string; title: string; status: "good" | "bad" | "warn" | "info" | "unknown"; detail: string; advice: string;
+  action: string; action_label: string; weight: number;
+}
+export interface SecurityReport { checked_ms: number; score: number; checks: SecurityCheck[]; refreshing: boolean }
+export interface DiskPoint { day: string; disk: string; health: string; temperature_c: number | null; wear_pct: number | null; power_on_hours: number | null }
+export interface Summary {
+  days: number; events: LevelCounts; new_problems: number; fixed_automatically: number; fixed_by_you: number;
+  open_problems: number; security_problems: number; highlights: string[];
+}
+export interface AppUpdate { name: string; id: string; version: string; available: string }
+export interface BackupSchedule { every_days: number; destination: string; folders: string[]; last_ms: number }
+export interface Prefs { auto_update_check: boolean; weekly_summary: boolean; backup_schedule: BackupSchedule | null }

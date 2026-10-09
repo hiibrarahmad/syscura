@@ -105,6 +105,81 @@ fn check_for_update(app: &AppHandle, marker: &Option<PathBuf>) {
     }
 }
 
+/// Once a week: what Syscura saw and did, as one notification.
+fn weekly_summary(app: &AppHandle) {
+    let state = app.state::<crate::AppState>();
+    let mut settings = state.settings();
+    let now = syscura_core::now_ms();
+    if !settings.prefs.weekly_summary {
+        return;
+    }
+    // The first week starts counting when Syscura first runs.
+    if settings.last_summary_ms == 0 {
+        settings.last_summary_ms = now;
+        state.save(settings);
+        return;
+    }
+    if now - settings.last_summary_ms < 7 * 86_400_000 {
+        return;
+    }
+    let Ok(Response::Summary(s)) = client::send(&Request::Summary { days: 7 }) else { return };
+    settings.last_summary_ms = now;
+    state.save(settings);
+    let fixed = s.fixed_automatically + s.fixed_by_you;
+    let title = if s.new_problems == 0 {
+        "Syscura's week: all quiet".to_string()
+    } else {
+        format!("Syscura's week: {} new problem{}, {fixed} fixed", s.new_problems, if s.new_problems == 1 { "" } else { "s" })
+    };
+    let mut body = format!(
+        "{} errors and {} warnings in Windows' logs.",
+        s.events.critical + s.events.error,
+        s.events.warning
+    );
+    if s.security_problems > 0 {
+        body.push_str(&format!(" {} security finding{}.", s.security_problems, if s.security_problems == 1 { "" } else { "s" }));
+    }
+    body.push_str(if s.open_problems > 0 { " Open Syscura to see what still needs you." } else { " Nothing needs you." });
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// Runs the scheduled backup when it is due and its drive is plugged in.
+fn scheduled_backup(app: &AppHandle) {
+    let state = app.state::<crate::AppState>();
+    let mut settings = state.settings();
+    let Some(mut schedule) = settings.prefs.backup_schedule.clone() else { return };
+    let now = syscura_core::now_ms();
+    if !schedule.due(now) || state.backup.lock().unwrap_or_else(|e| e.into_inner()).running {
+        return;
+    }
+    if !std::path::Path::new(&schedule.destination).is_dir() {
+        // Remind once a day while the drive stays unplugged past the due date.
+        if now - schedule.last_ms >= (schedule.every_days as i64 + 1) * 86_400_000 && now % 86_400_000 < 30_000 {
+            let _ = app
+                .notification()
+                .builder()
+                .title("Syscura: backup waiting for its drive")
+                .body(format!("Plug in {} and the backup starts by itself.", schedule.destination))
+                .show();
+        }
+        return;
+    }
+    match crate::backup::start(state.backup.clone(), schedule.destination.clone(), schedule.folders.clone(), Some("Scheduled")) {
+        Ok(dest) => {
+            schedule.last_ms = now;
+            settings.prefs.backup_schedule = Some(schedule);
+            state.save(settings);
+            let _ = app
+                .notification()
+                .builder()
+                .title("Syscura: backing up your files")
+                .body(format!("Copying changed files to {dest}. You can keep working."))
+                .show();
+        }
+        Err(e) => eprintln!("scheduled backup did not start: {e}"),
+    }
+}
+
 fn start_watcher(app: AppHandle) {
     let seen_path: Option<PathBuf> = app.path().app_local_data_dir().ok().map(|d| d.join("notified.json"));
     let update_marker: Option<PathBuf> = app.path().app_local_data_dir().ok().map(|d| d.join("update-notified.txt"));
@@ -152,8 +227,12 @@ fn start_watcher(app: AppHandle) {
             };
             if due {
                 last_update_check = Some(std::time::Instant::now());
-                check_for_update(&app, &update_marker);
+                if app.state::<crate::AppState>().settings().prefs.auto_update_check {
+                    check_for_update(&app, &update_marker);
+                }
             }
+            weekly_summary(&app);
+            scheduled_backup(&app);
             std::thread::sleep(Duration::from_secs(30));
         }
     });

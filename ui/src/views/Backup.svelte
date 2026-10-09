@@ -1,13 +1,36 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, driveSize } from "../lib/api";
-  import type { BackupInfo } from "../lib/types";
+  import type { BackupInfo, Prefs } from "../lib/types";
 
   let info = $state<BackupInfo | null>(null);
   let chosen = $state<Record<string, boolean>>({ desktop: true, documents: true, pictures: true, videos: false, music: false, downloads: false });
   let dest = $state("");
   let msg = $state<{ text: string; bad?: boolean } | null>(null);
   let rpMsg = $state("");
+
+  // Repeating backup
+  let prefs = $state<Prefs | null>(null);
+  let every = $state(7);
+  let schedMsg = $state<{ text: string; bad?: boolean } | null>(null);
+  async function loadPrefs() {
+    try {
+      prefs = await api.appPrefs();
+      if (prefs.backup_schedule) every = prefs.backup_schedule.every_days;
+    } catch { /* fine */ }
+  }
+  async function saveSchedule(on: boolean) {
+    if (!prefs) return;
+    const folders = Object.entries(chosen).filter(([, v]) => v).map(([k]) => k);
+    const next: Prefs = { ...prefs, backup_schedule: on ? { every_days: every, destination: dest, folders, last_ms: 0 } : null };
+    try {
+      await api.setAppPrefs(next);
+      prefs = next;
+      schedMsg = { text: on ? `Saved. Every ${every} day${every === 1 ? "" : "s"}, ${folders.length} folder${folders.length === 1 ? "" : "s"} go to ${dest}Syscura Backup\Scheduled.` : "The repeating backup is off." };
+    } catch (e) {
+      schedMsg = { text: String(e), bad: true };
+    }
+  }
 
   async function load() {
     try {
@@ -20,6 +43,7 @@
 
   onMount(() => {
     load();
+    loadPrefs();
     const t = setInterval(() => { if (info?.status.running) load(); }, 1500);
     return () => clearInterval(t);
   });
@@ -93,6 +117,20 @@
     </section>
 
     <section class="panel">
+      <h3>Repeat automatically</h3>
+      <p class="muted">While Syscura runs in the tray, it repeats this backup by itself, using the folders and drive chosen above. Each run copies only what changed into the same <b>Scheduled</b> folder, and never deletes anything. If the drive is unplugged, it waits and reminds you.</p>
+      {#if prefs?.backup_schedule}
+        <p><b>On:</b> every {prefs.backup_schedule.every_days} day{prefs.backup_schedule.every_days === 1 ? "" : "s"} to {prefs.backup_schedule.destination}{prefs.backup_schedule.last_ms ? `, last ran ${new Date(prefs.backup_schedule.last_ms).toLocaleDateString()}` : ", first run within a minute"}.</p>
+      {/if}
+      <div class="go">
+        <label class="check">Every <input class="days" type="number" min="1" max="31" bind:value={every} /> days</label>
+        <button class="btn btn--sm" disabled={!dest} onclick={() => saveSchedule(true)}>{prefs?.backup_schedule ? "Update schedule" : "Turn on"}</button>
+        {#if prefs?.backup_schedule}<button class="btn btn--ghost btn--sm" onclick={() => saveSchedule(false)}>Turn off</button>{/if}
+        {#if schedMsg}<span class:bad={schedMsg.bad} class="m">{schedMsg.text}</span>{/if}
+      </div>
+    </section>
+
+    <section class="panel">
       <h3>System restore point</h3>
       <p class="muted">Saves Windows' settings and system files so you can roll back if an update or driver breaks something. Your own files are not included (use the backup above for those). Needs the Syscura service.</p>
       <div class="go"><button onclick={restorePoint}>Create a restore point</button>{#if rpMsg}<span class="m">{rpMsg}</span>{/if}</div>
@@ -119,5 +157,6 @@
   .status { background: var(--panel-2); border-radius: var(--r-box); padding: 14px 18px; font-size: 14px; }
   .status p { margin: 3px 0; }
   .ok { color: var(--ok); }
+  .days { width: 64px; padding: 5px 10px; margin: 0 4px; }
   section p { margin: 0; font-size: 14.5px; }
 </style>

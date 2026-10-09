@@ -8,6 +8,9 @@
 //!   syscura-cli undo <attempt>              undo a fix that can be undone
 //!   syscura-cli ignore <problem>            stop showing a problem
 //!   syscura-cli processes [--warn] [--json] running programs (warnings only)
+//!   syscura-cli security [--refresh] [--json] Windows' security settings, with a score
+//!   syscura-cli summary [-d DAYS] [--json]  what happened lately (default 7 days)
+//!   syscura-cli disks [--json]              daily drive health readings
 
 use std::process::ExitCode;
 
@@ -36,6 +39,18 @@ fn main() -> ExitCode {
         Some("actions") => Request::Actions,
         Some("processes") => Request::Processes,
         Some("problems") => Request::Findings { include_closed: args.iter().any(|a| a == "--all") },
+        Some("security") => Request::Security { refresh: args.iter().any(|a| a == "--refresh") },
+        Some("disks") => Request::DiskHistory,
+        Some("summary") => {
+            let days = match args.iter().position(|a| a == "-d") {
+                Some(i) => match args.get(i + 1).and_then(|n| n.parse().ok()) {
+                    Some(n) => n,
+                    None => return usage("-d needs a number of days"),
+                },
+                None => 7,
+            };
+            Request::Summary { days }
+        }
         Some(cmd @ ("fix" | "undo" | "ignore")) => {
             let num = |i: usize| args.get(i).and_then(|n| n.parse::<i64>().ok());
             match (cmd, num(1), num(2)) {
@@ -82,6 +97,39 @@ fn main() -> ExitCode {
                 println!("{:<26} {:?}  {}", a.id, a.risk, a.description);
             }
         }
+        Response::Security(r) => {
+            if r.checks.is_empty() {
+                println!("The security check is running; ask again in a few seconds.");
+            } else {
+                println!("Security score: {} / 100{}", r.score, if r.refreshing { " (a new check is running)" } else { "" });
+                for c in &r.checks {
+                    println!("  [{:<7}] {}: {}", c.status, c.title, c.detail);
+                }
+            }
+        }
+        Response::Summary(s) => {
+            println!("Last {} days:", s.days);
+            println!("  new problems      {} ({} about security)", s.new_problems, s.security_problems);
+            println!("  fixed             {} by Syscura, {} by you", s.fixed_automatically, s.fixed_by_you);
+            println!("  still open        {}", s.open_problems);
+            println!("  Windows events    {} errors, {} warnings", s.events.critical + s.events.error, s.events.warning);
+            for h in &s.highlights {
+                println!("  - {h}");
+            }
+        }
+        Response::DiskHistory(points) => {
+            println!("{:<12} {:<40} {:<10} {:>6} {:>6}", "DAY", "DRIVE", "HEALTH", "WEAR", "TEMP");
+            for p in points {
+                let wear = p.wear_pct.map(|w| format!("{w}%")).unwrap_or_else(|| "-".into());
+                let temp = p.temperature_c.map(|t| format!("{t:.0}C")).unwrap_or_else(|| "-".into());
+                println!("{:<12} {:<40} {:<10} {:>6} {:>6}", p.day, p.disk, p.health, wear, temp);
+            }
+        }
+        Response::Options(o) => {
+            for (k, v) in o {
+                println!("{k} = {v}");
+            }
+        }
         Response::Error(e) => {
             eprintln!("Agent error: {e}");
             return ExitCode::FAILURE;
@@ -100,6 +148,9 @@ fn usage(problem: &str) -> ExitCode {
        syscura-cli hw [--refresh] [--json]
        syscura-cli problems [--all] [--json]
        syscura-cli processes [--warn] [--json]
+       syscura-cli security [--refresh] [--json]
+       syscura-cli summary [-d DAYS] [--json]
+       syscura-cli disks [--json]
        syscura-cli fix <problem> <fix> | undo <attempt> | ignore <problem>"
     );
     ExitCode::from(2)

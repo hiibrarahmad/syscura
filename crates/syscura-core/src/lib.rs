@@ -124,6 +124,82 @@ pub struct ProcessInfo {
     pub warning: String,
 }
 
+/// One check of the PC's security settings, for the Security page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecurityCheck {
+    pub id: String,
+    pub title: String,
+    /// "good", "bad", "warn", "info" (does not count) or "unknown".
+    pub status: String,
+    /// What Syscura found, in plain words.
+    pub detail: String,
+    /// What to do about it.
+    pub advice: String,
+    /// Catalog action that fixes it, when there is a safe way.
+    pub action: String,
+    pub action_label: String,
+    /// How much it counts towards the score (0 = not counted).
+    pub weight: u8,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecurityReport {
+    pub checked_ms: i64,
+    /// 0-100: the weighted share of checks that are good.
+    pub score: u8,
+    pub checks: Vec<SecurityCheck>,
+    /// A new check is running; ask again in a few seconds.
+    pub refreshing: bool,
+}
+
+impl SecurityReport {
+    pub fn new(checks: Vec<SecurityCheck>) -> Self {
+        let counted = checks.iter().filter(|c| c.weight > 0 && matches!(c.status.as_str(), "good" | "warn" | "bad"));
+        let (mut total, mut got) = (0u32, 0f32);
+        for c in counted {
+            total += c.weight as u32;
+            got += c.weight as f32
+                * match c.status.as_str() {
+                    "good" => 1.0,
+                    "warn" => 0.5,
+                    _ => 0.0,
+                };
+        }
+        let score = if total == 0 { 0 } else { (got / total as f32 * 100.0).round() as u8 };
+        SecurityReport { checked_ms: now_ms(), score, checks, refreshing: false }
+    }
+}
+
+/// A drive's health on one day, for trends.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiskPoint {
+    /// YYYY-MM-DD.
+    pub day: String,
+    pub disk: String,
+    pub health: String,
+    pub temperature_c: Option<f64>,
+    pub wear_pct: Option<u32>,
+    pub power_on_hours: Option<u64>,
+}
+
+/// What happened over the last days, for the weekly summary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Summary {
+    pub days: u32,
+    pub events: LevelCounts,
+    pub new_problems: u64,
+    pub fixed_automatically: u64,
+    pub fixed_by_you: u64,
+    pub open_problems: u64,
+    pub security_problems: u64,
+    /// Titles of the newest problems.
+    pub highlights: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub version: String,
@@ -190,6 +266,15 @@ pub enum Request {
     /// Ask a console-mode agent to exit (used before installing the
     /// service). Refused when running as a service.
     Shutdown,
+    /// The security settings check, re-run when `refresh`.
+    Security { refresh: bool },
+    /// Agent options (for example "ransomware_canary" = "on").
+    Options,
+    SetOption { key: String, value: String },
+    /// Daily drive health readings.
+    DiskHistory,
+    /// What happened over the last `days` days.
+    Summary { days: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +286,10 @@ pub enum Response {
     Findings(Vec<findings::Finding>),
     Actions(Vec<findings::ActionInfo>),
     Processes(Vec<ProcessInfo>),
+    Security(SecurityReport),
+    Options(BTreeMap<String, String>),
+    DiskHistory(Vec<DiskPoint>),
+    Summary(Summary),
     Done(String),
     Error(String),
 }
@@ -223,6 +312,14 @@ mod tests {
         assert_eq!(line, r#"{"cmd":"events","limit":5,"max_level":"error"}"#);
         let back: Request = serde_json::from_str(&line).unwrap();
         assert!(matches!(back, Request::Events { limit: 5, max_level: Some(Level::Error) }));
+    }
+
+    #[test]
+    fn security_score_weighs_checks() {
+        let c = |status: &str, weight| SecurityCheck { status: status.into(), weight, ..Default::default() };
+        assert_eq!(SecurityReport::new(vec![c("good", 2), c("bad", 2)]).score, 50);
+        assert_eq!(SecurityReport::new(vec![c("good", 3), c("warn", 2), c("unknown", 5), c("info", 0)]).score, 80);
+        assert_eq!(SecurityReport::new(vec![]).score, 0);
     }
 
     #[test]

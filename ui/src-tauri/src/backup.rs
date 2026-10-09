@@ -47,6 +47,39 @@ pub struct Status {
     pub error: Option<String>,
 }
 
+/// A backup that repeats by itself while Syscura runs in the tray.
+#[derive(Serialize, serde::Deserialize, Clone)]
+pub struct Schedule {
+    pub every_days: u32,
+    /// Drive root or folder, e.g. "E:\".
+    pub destination: String,
+    /// Folder ids, as in `folders()`.
+    pub folders: Vec<String>,
+    /// Unix ms of the last scheduled run.
+    #[serde(default)]
+    pub last_ms: i64,
+}
+
+impl Schedule {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=31).contains(&self.every_days) {
+            return Err("Choose every 1 to 31 days.".into());
+        }
+        if self.folders.is_empty() {
+            return Err("Choose at least one folder to back up.".into());
+        }
+        let b = self.destination.as_bytes();
+        if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || b[2] != b'\\' {
+            return Err("Choose a drive to back up to.".into());
+        }
+        Ok(())
+    }
+
+    pub fn due(&self, now_ms: i64) -> bool {
+        now_ms - self.last_ms >= self.every_days as i64 * 86_400_000
+    }
+}
+
 #[derive(Serialize, Clone)]
 pub struct FolderResult {
     pub name: String,
@@ -98,8 +131,10 @@ pub fn targets(volumes: &[syscura_core::hw::VolumeInfo]) -> Vec<Target> {
 }
 
 /// Starts copying in the background. `dest_root` must be an existing drive
-/// root or folder; a dated "Syscura Backup" folder is created inside it.
-pub fn start(status: Arc<Mutex<Status>>, dest_root: String, chosen: Vec<String>) -> Result<String, String> {
+/// root or folder; a dated "Syscura Backup" folder is created inside it
+/// (or `fixed`, for scheduled backups: copying into the same folder again
+/// only copies what changed, and still never deletes anything).
+pub fn start(status: Arc<Mutex<Status>>, dest_root: String, chosen: Vec<String>, fixed: Option<&str>) -> Result<String, String> {
     if status.lock().unwrap_or_else(|e| e.into_inner()).running {
         return Err("A backup is already running.".into());
     }
@@ -117,7 +152,7 @@ pub fn start(status: Arc<Mutex<Status>>, dest_root: String, chosen: Vec<String>)
     if let Some(f) = picked.iter().find(|f| root_lc.starts_with(&f.path.to_ascii_lowercase())) {
         return Err(format!("The destination is inside your {} folder. Pick another drive.", f.name));
     }
-    let stamp = chrono_like_stamp();
+    let stamp = fixed.map(str::to_string).unwrap_or_else(chrono_like_stamp);
     let dest = root.join("Syscura Backup").join(&stamp);
     std::fs::create_dir_all(&dest).map_err(|e| format!("Cannot create {}: {e}", dest.display()))?;
 
@@ -170,4 +205,28 @@ fn chrono_like_stamp() -> String {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let t = unsafe { GetLocalTime() };
     format!("{:04}-{:02}-{:02} {:02}{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Schedule;
+
+    #[test]
+    fn schedules_are_checked() {
+        let s = |days, dest: &str, folders: &[&str]| Schedule {
+            every_days: days,
+            destination: dest.into(),
+            folders: folders.iter().map(|f| f.to_string()).collect(),
+            last_ms: 0,
+        };
+        assert!(s(7, "E:\\", &["documents"]).validate().is_ok());
+        assert!(s(0, "E:\\", &["documents"]).validate().is_err());
+        assert!(s(7, "E:\\", &[]).validate().is_err());
+        assert!(s(7, "nowhere", &["documents"]).validate().is_err());
+        let mut w = s(7, "E:\\", &["documents"]);
+        assert!(w.due(8 * 86_400_000), "never run: due");
+        w.last_ms = 1_000;
+        assert!(!w.due(1_000 + 6 * 86_400_000));
+        assert!(w.due(1_000 + 7 * 86_400_000));
+    }
 }

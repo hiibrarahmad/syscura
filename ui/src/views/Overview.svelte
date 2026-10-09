@@ -4,7 +4,8 @@
   import { nav } from "../lib/nav.svelte";
   import { api, ago, driveSize, duration, gb, mb } from "../lib/api";
   import SocialLinks from "../lib/SocialLinks.svelte";
-  import type { Finding, HardwareInfo, Sensor, StatusInfo } from "../lib/types";
+  import type { Finding, HardwareInfo, SecurityReport, Sensor, StatusInfo, Summary } from "../lib/types";
+  import { onMount } from "svelte";
 
   let {
     hw,
@@ -15,6 +16,7 @@
     onproblems,
     onhardware,
     onsettings,
+    onsecurity,
   }: {
     hw: HardwareInfo | null;
     fromAgent: boolean;
@@ -24,7 +26,15 @@
     onproblems: () => void;
     onhardware: () => void;
     onsettings: () => void;
+    onsecurity: () => void;
   } = $props();
+
+  let week = $state<Summary | null>(null);
+  let security = $state<SecurityReport | null>(null);
+  onMount(() => {
+    api.summary(7).then((s) => (week = s)).catch(() => {});
+    api.security(false).then((r) => (security = r.checks.length ? r : null)).catch(() => {});
+  });
 
   const find = (at: string, kind: string) => sensors.find((s) => s.site.at === at && s.kind === kind);
   const cpuTemp = $derived(find("cpu", "temperature"));
@@ -192,6 +202,9 @@
       {:else}
         <div class="line"><span class="muted">Background protection</span><b>Off</b></div>
       {/if}
+      {#if security}
+        <div class="line"><span class="muted">Security settings</span><button class="lnk" onclick={onsecurity}><b>{security.score} / 100{security.checks.some((c) => c.status === "bad") ? " · see what to fix" : ""}</b></button></div>
+      {/if}
       {#if status}
         <div class="line"><span class="muted">Syscura</span><b>{status.service ? "Windows service" : "This session"} · {mb(status.working_set_bytes)}</b></div>
       {/if}
@@ -209,6 +222,14 @@
       {#if hw?.battery.length}<div class="line"><span class="muted">Battery</span><b>{hw.battery[0].charge_pct ?? "?"} %{hw.battery[0].wear_pct != null ? ` · ${hw.battery[0].wear_pct} % worn` : ""}</b></div>{/if}
       <div class="line"><span class="muted">Fixed by Syscura</span><b>{fixed.length} problem{fixed.length === 1 ? "" : "s"}</b></div>
     </div>
+    {#if week}
+      <div class="block">
+        <span class="bhead">This week</span>
+        <div class="line"><span class="muted">New problems</span><b>{week.new_problems}{week.security_problems ? ` · ${week.security_problems} about security` : ""}</b></div>
+        <div class="line"><span class="muted">Fixed</span><b>{week.fixed_automatically} by Syscura · {week.fixed_by_you} by you</b></div>
+        <div class="line"><span class="muted">Windows errors</span><b>{(week.events.critical + week.events.error).toLocaleString()} · {week.events.warning.toLocaleString()} warnings</b></div>
+      </div>
+    {/if}
     {#if hw}
       <button class="pc" onclick={onhardware}>
         <b>{name}</b>
@@ -251,4 +272,6 @@
   .pc:hover b { text-decoration: underline; }
   .right { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
   .footer .link { font-size: 13px; }
+  .lnk { background: none; border: 0; padding: 0; color: inherit; text-align: right; }
+  .lnk:hover b { text-decoration: underline; }
 </style>

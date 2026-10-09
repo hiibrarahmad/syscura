@@ -203,3 +203,26 @@ mod tests {
         assert!(parse_event_xml("not xml <<<").is_none());
     }
 }
+
+/// Property tests: event XML comes from other programs' event logs, so the
+/// parser must survive anything (`cargo test` runs a few hundred random cases).
+#[cfg(test)]
+mod fuzz {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn never_panics_on_any_text(s in ".{0,400}") {
+            let _ = super::parse_event_xml(&s);
+            let _ = super::parse_system_time(&s);
+        }
+
+        #[test]
+        fn never_panics_on_xml_like_text(
+            tags in proptest::collection::vec("(<|</|/>|>|=|\"|&amp;|&#x0;|Data|Name|EventID|Level|System|TimeCreated|SystemTime|[a-z0-9 ]{0,6})", 0..80)
+        ) {
+            let s: String = tags.concat();
+            let _ = super::parse_event_xml(&format!("<Event>{s}</Event>"));
+        }
+    }
+}

@@ -12,9 +12,10 @@
   import Settings from "./views/Settings.svelte";
   import Backup from "./views/Backup.svelte";
   import Processes from "./views/Processes.svelte";
+  import Security from "./views/Security.svelte";
   import { backupFirst, isCritical } from "./lib/warnings";
 
-  type View = "overview" | "problems" | "processes" | "hardware" | "events" | "backup" | "settings";
+  type View = "overview" | "problems" | "security" | "processes" | "hardware" | "events" | "backup" | "settings";
   let view = $state<View>("overview");
   let hw = $state<HardwareInfo | null>(null);
   let fromAgent = $state(false);
@@ -92,6 +93,7 @@
   const nav: { id: View; label: string }[] = [
     { id: "overview", label: "Overview" },
     { id: "problems", label: "Problems" },
+    { id: "security", label: "Security" },
     { id: "processes", label: "Processes" },
     { id: "hardware", label: "Hardware" },
     { id: "events", label: "Events" },
@@ -134,9 +136,11 @@
     <section class="panel"><b>Could not read the hardware.</b><p class="muted">{error}</p><button onclick={() => scan(true)}>Try again</button></section>
   {:else if view === "overview"}
     <Overview {hw} {fromAgent} {status} {sensors} {findings}
-      onproblems={() => go("problems")} onhardware={() => go("hardware")} onsettings={() => go("settings")} />
+      onproblems={() => go("problems")} onhardware={() => go("hardware")} onsettings={() => go("settings")} onsecurity={() => go("security")} />
   {:else if view === "problems"}
     <Problems />
+  {:else if view === "security"}
+    <Security />
   {:else if view === "processes"}
     <Processes />
   {:else if view === "hardware" && hw}

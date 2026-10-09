@@ -275,7 +275,8 @@ mod tests {
         "service.ensure_running", "service.disable", "dns.flush", "time.resync", "defender.quick_scan",
         "defender.full_scan", "defender.update", "defender.enable_realtime", "sfc.scan", "dism.restore_health",
         "chkdsk.scan", "winsock.reset", "wu.reset_cache", "restore_point", "defender.scan_path",
-        "defender.remove_threats", "defender.offline_scan", "process.stop",
+        "defender.remove_threats", "defender.offline_scan", "process.stop", "firewall.enable", "rdp.disable",
+        "smb1.disable", "driverblocklist.enable", "defender.enable_cfa",
     ];
 
     #[test]
@@ -342,5 +343,38 @@ mod tests {
         let ps = &subs["Microsoft-Windows-PowerShell/Operational"];
         assert!(ps.contains("EventID=4104") && ps.contains("Level=3"));
         assert!(!ps.contains("Level=1 or Level=2 or Level=3)"), "no blanket level filter outside System/Application");
+    }
+}
+
+/// Property tests: event data is written by other programs.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn templates_never_panic(template in ".{0,200}", key in "[A-Za-z0-9]{0,8}", value in ".{0,300}", count in any::<u64>()) {
+            let ev = BTreeMap::from([(key, value)]);
+            let out = render(&template, &ev, count);
+            // Values are cut to one readable line.
+            prop_assert!(!out.contains('\n') || template.contains('\n'));
+        }
+
+        #[test]
+        fn rules_accept_any_event(
+            channel in "(System|Application|Syscura/Startup|Syscura/Network|Syscura/Drivers|Syscura/Ransomware|Syscura/Disks|.{0,20})",
+            id in 0u32..60000,
+            level in 0u8..6,
+            data in proptest::collection::btree_map("[A-Za-z0-9_]{1,10}", ".{0,200}", 0..8),
+        ) {
+            let mut e = Engine::builtin().unwrap();
+            let ev = Event { ts: 1, source: "fuzz".into(), channel, provider: "x".into(), event_id: id, level: Level::from_u8(level), record_id: 1, data };
+            for hit in e.evaluate(&ev) {
+                prop_assert!(hit.group.chars().count() <= MAX_GROUP);
+                let rule = e.rule(&hit.rule).unwrap();
+                let _ = render(&rule.explain, &hit.evidence, 1);
+            }
+        }
     }
 }

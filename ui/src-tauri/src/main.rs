@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod apps;
 mod backup;
 mod tray;
 mod update;
@@ -20,31 +21,52 @@ use syscura_core::{Level, Request, Response, StatusInfo, StoredEvent, client};
 use syscura_online::{Analysis, Gemini, Question, secrets};
 use tauri::{Manager, State};
 
-#[derive(Default, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
-struct Settings {
+pub struct Settings {
     /// Model chosen when the key was saved (re-chosen if Google retires it).
     ai_model: Option<String>,
     /// Let the AI fix safe problems by itself.
     ai_auto_fix: bool,
+    #[serde(flatten)]
+    pub prefs: Prefs,
+    /// When the last weekly summary was shown.
+    pub last_summary_ms: i64,
 }
 
-struct AppState {
+/// Choices on the Settings and Backup pages.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct Prefs {
+    /// Ask GitHub once a day whether there is a newer Syscura.
+    pub auto_update_check: bool,
+    /// A Windows notification once a week with what Syscura saw and did.
+    pub weekly_summary: bool,
+    pub backup_schedule: Option<backup::Schedule>,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs { auto_update_check: true, weekly_summary: true, backup_schedule: None }
+    }
+}
+
+pub struct AppState {
     /// The last update check: (when, result), so GitHub is asked at most
     /// every few hours.
     update: Mutex<Option<(std::time::Instant, update::UpdateInfo)>>,
     hardware: Mutex<Option<HardwareInfo>>,
-    backup: Arc<Mutex<backup::Status>>,
+    pub backup: Arc<Mutex<backup::Status>>,
     settings: Mutex<Settings>,
     settings_path: PathBuf,
 }
 
 impl AppState {
-    fn settings(&self) -> Settings {
+    pub fn settings(&self) -> Settings {
         self.settings.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn save(&self, s: Settings) {
+    pub fn save(&self, s: Settings) {
         if let Ok(json) = serde_json::to_string_pretty(&s) {
             let _ = std::fs::write(&self.settings_path, json);
         }
@@ -196,6 +218,80 @@ async fn update_install(app: tauri::AppHandle) -> Result<String, String> {
         handle.exit(0);
     });
     Ok("Installing the update. Syscura closes now and opens again when it is done.".into())
+}
+
+#[tauri::command]
+async fn security(refresh: bool) -> Result<syscura_core::SecurityReport, String> {
+    match agent_call(Request::Security { refresh }).await? {
+        Response::Security(r) => Ok(r),
+        Response::Error(e) => Err(e),
+        _ => Err("unexpected reply from agent".into()),
+    }
+}
+
+#[tauri::command]
+async fn agent_options() -> Result<BTreeMap<String, String>, String> {
+    match agent_call(Request::Options).await? {
+        Response::Options(o) => Ok(o),
+        Response::Error(e) => Err(e),
+        _ => Err("unexpected reply from agent".into()),
+    }
+}
+
+#[tauri::command]
+async fn set_agent_option(key: String, value: String) -> Result<String, String> {
+    done(Request::SetOption { key, value }).await
+}
+
+#[tauri::command]
+async fn disk_history() -> Result<Vec<syscura_core::DiskPoint>, String> {
+    match agent_call(Request::DiskHistory).await? {
+        Response::DiskHistory(d) => Ok(d),
+        Response::Error(e) => Err(e),
+        _ => Err("unexpected reply from agent".into()),
+    }
+}
+
+#[tauri::command]
+async fn summary(days: u32) -> Result<syscura_core::Summary, String> {
+    match agent_call(Request::Summary { days }).await? {
+        Response::Summary(s) => Ok(s),
+        Response::Error(e) => Err(e),
+        _ => Err("unexpected reply from agent".into()),
+    }
+}
+
+#[tauri::command]
+async fn outdated_apps() -> Result<Vec<apps::AppUpdate>, String> {
+    blocking(apps::outdated).await?
+}
+
+#[tauri::command]
+fn update_apps(ids: Vec<String>) -> Result<String, String> {
+    apps::update(&ids)
+}
+
+#[tauri::command]
+fn app_prefs(state: State<'_, AppState>) -> Prefs {
+    state.settings().prefs
+}
+
+#[tauri::command]
+fn set_app_prefs(state: State<'_, AppState>, prefs: Prefs) -> Result<String, String> {
+    if let Some(s) = &prefs.backup_schedule {
+        s.validate()?;
+    }
+    let mut settings = state.settings();
+    // Keep when the schedule last ran, unless it now points elsewhere.
+    let mut prefs = prefs;
+    if let (Some(new), Some(old)) = (prefs.backup_schedule.as_mut(), settings.prefs.backup_schedule.as_ref())
+        && new.destination == old.destination
+    {
+        new.last_ms = old.last_ms;
+    }
+    settings.prefs = prefs;
+    state.save(settings);
+    Ok("Saved.".into())
 }
 
 #[tauri::command]
@@ -436,7 +532,7 @@ async fn backup_info(app: tauri::AppHandle) -> Result<BackupInfo, String> {
 
 #[tauri::command]
 fn backup_start(state: State<'_, AppState>, destination: String, folders: Vec<String>) -> Result<String, String> {
-    backup::start(state.backup.clone(), destination, folders)
+    backup::start(state.backup.clone(), destination, folders, None)
 }
 
 // ------------------------------------------------------------------ agent
@@ -512,6 +608,14 @@ async fn install_service() -> Result<String, String> {
         // Judge by what Windows reports, not by the helper's exit code.
         for _ in 0..20 {
             match service_state().as_deref() {
+                // A copy run from a user folder was copied to Program Files
+                // (a SYSTEM service must not run from a folder any program
+                // can change). Only that copy may change things through the
+                // service, so continue from there.
+                Some("RUNNING") if let Some(installed) = installed_copy() => {
+                    relaunch_from(&installed);
+                    return Ok("Done. Syscura was copied to Program Files, runs as a Windows service, and opens from there now.".to_string());
+                }
                 Some("RUNNING") => return Ok("Done. Syscura now runs as a Windows service and starts with Windows.".to_string()),
                 Some(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
                 None => break,
@@ -535,6 +639,32 @@ async fn install_service() -> Result<String, String> {
     .await?
 }
 
+/// `Program Files\Syscura\Syscura.exe`, when this app runs from somewhere
+/// else (the portable zip) and that copy exists.
+fn installed_copy() -> Option<PathBuf> {
+    let pf = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"))?;
+    let installed = PathBuf::from(pf).join("Syscura").join("Syscura.exe");
+    let me = std::env::current_exe().ok()?;
+    let same = std::fs::canonicalize(&installed).ok()? == std::fs::canonicalize(&me).ok()?;
+    (!same).then_some(installed)
+}
+
+/// Opens `exe` once this copy has quit (only one Syscura runs at a time).
+fn relaunch_from(exe: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let ps = std::path::Path::new(&windir).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let _ = std::process::Command::new(ps)
+        .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 3; Start-Process -FilePath $env:SYSCURA_APP"])
+        .env("SYSCURA_APP", exe)
+        .creation_flags(0x0000_0008 | 0x0800_0000)
+        .spawn();
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::process::exit(0);
+    });
+}
+
 /// Page to open first, from `--view <name>` on the command line.
 #[tauri::command]
 fn initial_view() -> Option<String> {
@@ -555,7 +685,7 @@ fn main() {
             let settings = std::fs::read_to_string(&settings_path)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or(Settings { ai_model: None, ai_auto_fix: true });
+                .unwrap_or(Settings { ai_auto_fix: true, ..Default::default() });
             app.manage(AppState {
                 update: Mutex::new(None),
                 hardware: Mutex::new(None),
@@ -600,6 +730,15 @@ fn main() {
             start_agent,
             install_service,
             initial_view,
+            security,
+            agent_options,
+            set_agent_option,
+            disk_history,
+            summary,
+            outdated_apps,
+            update_apps,
+            app_prefs,
+            set_app_prefs,
         ])
         .build(tauri::generate_context!())
         .expect("error while starting Syscura");

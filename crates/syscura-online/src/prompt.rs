@@ -447,3 +447,28 @@ mod tests {
         );
     }
 }
+
+/// Property tests: nothing private may survive masking, and AI replies are
+/// untrusted text.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn names_never_leave_the_pc(prefix in ".{0,80}", suffix in ".{0,80}", user in "[A-Za-z][A-Za-z0-9]{3,12}", pc in "[A-Z][A-Z0-9-]{3,12}") {
+            let s = Secrets { user_name: user.clone(), computer_name: pc.clone(), profile_dir: format!(r"C:\Users\{user}") };
+            let text = format!("{prefix} C:\\Users\\{user}\\AppData {pc} {}{suffix}", user.to_uppercase());
+            let out = redact(&text, &s);
+            let leaked = format!(r"\users\{}", user.to_ascii_lowercase());
+            prop_assert!(!out.to_ascii_lowercase().contains(&leaked), "profile path leaked: {}", out);
+        }
+
+        #[test]
+        fn replies_never_panic(text in ".{0,600}") {
+            let _ = parse_reply(&text, &[]);
+            let _ = parse_specs(&text, &["CPU > Model".to_string()]);
+        }
+    }
+}

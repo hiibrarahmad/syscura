@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DiskTrends from "../lib/DiskTrends.svelte";
   import { buildReport, reportText, type Section } from "../lib/report";
   import { api, driveSize, fmtSensor, gb } from "../lib/api";
   import { ai } from "../lib/ai.svelte";
@@ -282,6 +283,8 @@
 {:else}
   <section class="panel"><p class="muted" style="margin: 0">Nothing matches “{filter}”.</p></section>
 {/each}
+
+{#if !filter && (!only || only === "storage")}<DiskTrends />{/if}
 
 {#if hw.notes.length && !filter && !only}
   <section class="panel" style="padding: 30px 36px; gap: 12px">

@@ -49,8 +49,7 @@ pub fn run(data_dir: PathBuf, tx: Sender<Msg>, rx: Receiver<Msg>, console: bool)
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("cannot create {}: {e}", data_dir.display()))?;
     let db_path = data_dir.join("syscura.db");
-    let store =
-        Store::open(&db_path).map_err(|e| format!("cannot open {}: {e}", db_path.display()))?;
+    let store = crate::dbsafe::open(&data_dir, &db_path)?;
     match store.repair_old_outcomes() {
         Ok(0) | Err(_) => {}
         Ok(n) => log::info(&format!("corrected {n} older fix result(s) that had found nothing to repair")),
@@ -88,8 +87,9 @@ pub fn run(data_dir: PathBuf, tx: Sender<Msg>, rx: Receiver<Msg>, console: bool)
         console,
         watch: watcher.clone(),
     });
-    ipc::start(db_path, shared)?;
-    hardware::start_boot_check(data_dir.clone(), hardware_cache, tx.clone());
+    ipc::start(db_path.clone(), shared)?;
+    crate::canary::start(db_path, tx.clone());
+    hardware::start_boot_check(data_dir.clone(), hardware_cache.clone(), tx.clone());
     start_history_check(queries, tx.clone());
     watch::start(watcher, tx.clone());
     log::info(&format!("agent started, data in {}", data_dir.display()));
@@ -99,6 +99,8 @@ pub fn run(data_dir: PathBuf, tx: Sender<Msg>, rx: Receiver<Msg>, console: bool)
     loop {
         if last_prune.is_none_or(|t| t.elapsed() >= PRUNE_EVERY) {
             prune(&store);
+            crate::dbsafe::daily_backup(&store, &data_dir);
+            daily_disk_check(&store, &hardware_cache, &tx);
             last_prune = Some(Instant::now());
         }
         match rx.recv_timeout(PRUNE_EVERY) {
@@ -213,6 +215,19 @@ fn start_history_check(queries: std::collections::BTreeMap<String, String>, tx: 
     });
     if let Err(e) = spawned {
         log::error(&format!("cannot start the history check: {e}"));
+    }
+}
+
+/// Today's drive health reading, from a hardware scan at most 6 hours old.
+fn daily_disk_check(store: &Store, cache: &HardwareCache, tx: &Sender<Msg>) {
+    let six_hours = 6 * 60 * 60 * 1000;
+    let hw = match cache.get(false) {
+        Ok(hw) if now_ms() - hw.collected_ms < six_hours => Ok(hw),
+        _ => cache.get(true),
+    };
+    match hw {
+        Ok(hw) => crate::disks::record(store, &hw, tx),
+        Err(e) => log::error(&format!("drive health check skipped: {e}")),
     }
 }
 

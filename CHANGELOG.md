@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.1.0
+
+Security hardening, a Security page, deeper malware checks, and Windows on ARM. Changes since 1.0.0:
+
+### Safer by design
+- **Only Syscura can change things through its service.** Before, any program running on the PC could ask the background service (which runs with full system rights) to mark something as safe, ignore a problem, or disable another program's service. Now anyone may still read, but changes are only accepted from Syscura's own app and command line next to the service, or from a program you ran as administrator.
+- **Signed updates.** Every release's checksum list is signed with Syscura's own key, and the app checks that signature before it installs an update. A copy of the release files on GitHub is no longer enough to push an update.
+- **Portable copies are moved to Program Files before becoming a service**, because a service running with full rights must not live in a folder any program can change. The app then opens from there.
+- **The database repairs itself.** It is checked at every start and backed up daily (the last 3 are kept). A damaged database (after a power cut, for example) is set aside, never deleted, and Syscura continues from the last good backup.
+- Releases are now built and tested by GitHub Actions, never on a PC, ready for free code signing (SignPath Foundation, applied for). Dependencies are checked for known security holes on every change, and the parsers that read event logs, settings files and AI replies are tested with hundreds of random inputs.
+
+### Security page (new)
+- **A security score out of 100** from Windows' own settings: firewall, Defender real-time protection, virus definitions, tamper protection, User Account Control, recent Windows updates, SMBv1, Remote Desktop, Secure Boot, Microsoft's vulnerable driver blocklist, BitLocker, LSA protection and Controlled folder access. Each check says what it found and what to do.
+- One-click fixes where there is a safe one: turn the firewall on, turn Remote Desktop off, remove SMBv1, turn on the vulnerable driver blocklist, turn on Controlled folder access. Changes that can be undone get an Undo.
+- **Programs with updates:** lists what winget can update and updates one or all of them in a window you can watch.
+- **Ransomware tripwire** (optional): a hidden file in Documents and Pictures, checked every 5 seconds. If something encrypts or renames it, Syscura warns at once.
+
+### Deeper malware checks
+- Startup tricks: debugger hijacks (including the sign-in-screen backdoor on sethc.exe and utilman.exe), a replaced Windows shell or Userinit, AppInit DLLs, WMI tasks that run commands, and unsigned services in user folders.
+- Network tampering: hosts-file entries that block security or update sites or send popular sites elsewhere, proxies, unknown DNS servers typed in by hand, and browser extensions forced on by policy.
+- **Drivers with known security holes or known to be malicious**, from the LOLDrivers list (shipped with Syscura, no download).
+- Privacy tweaks that block Windows telemetry are recognised and not flagged.
+
+### Drives, backups and a weekly summary
+- **Drive health over time:** one reading a day (health, wear, temperature), shown on the Hardware page. Syscura warns when wear rises fast, a drive nears the end of its rated life, runs hot, or its health drops.
+- **Repeating backups:** the Backup page can repeat a backup every few days while Syscura runs in the tray. Each run copies only what changed and never deletes anything. If the drive is unplugged, Syscura waits and reminds you.
+- **Weekly summary:** one notification a week with what Syscura found and fixed. The Overview shows the week and the security score too.
+
+### Any PC
+- **Native Windows on ARM (ARM64)** builds and installer for Snapdragon laptops, tested on Windows 11 ARM. An x64 copy on an ARM PC updates to the native build.
+- Graphics load now shows for every GPU maker (Intel, AMD, NVIDIA, Qualcomm), from Windows' own counters.
+
+### More
+- Settings: turn the daily update check and the weekly summary on or off.
+- Command line: `syscura-cli security`, `syscura-cli summary` and `syscura-cli disks`.
+
 ## 1.0.0
 
 The first full release. Everything from the betas, plus a real installer, built-in updates, a live process watch and much more. Changes since 0.1.0-beta.2:

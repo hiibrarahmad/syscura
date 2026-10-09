@@ -235,7 +235,10 @@ fn apply(store: &Store, finding_id: i64, plan: Plan, automatic: bool) -> Option<
 /// Defender. Checks every such open problem (or just `only`) and closes
 /// those whose files no longer exist. Returns how many it closed.
 pub fn resolve_gone_files(store: &Store, only: Option<i64>) -> usize {
-    const FILE_RULES: &[&str] = &["sec.threat", "proc.fake_system", "proc.unsigned_user", "sec.startup_unsigned"];
+    const FILE_RULES: &[&str] = &[
+        "sec.threat", "proc.fake_system", "proc.unsigned_user", "sec.startup_unsigned", "sec.service_user", "drv.vulnerable",
+        "drv.malicious",
+    ];
     let Ok(rows) = store.findings(false, 500) else { return 0 };
     let mut closed = 0;
     for f in rows {

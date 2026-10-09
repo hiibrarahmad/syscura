@@ -28,6 +28,19 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE (source, channel, record_id)
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS disk_history (
+    day    TEXT NOT NULL,
+    disk   TEXT NOT NULL,
+    health TEXT NOT NULL,
+    temp_c REAL,
+    wear   INTEGER,
+    hours  INTEGER,
+    PRIMARY KEY (day, disk)
+);
 ";
 
 pub struct Store {
@@ -49,6 +62,19 @@ impl Store {
         conn.execute_batch(findings::SCHEMA)?;
         findings::migrate(&conn)?;
         Ok(Store { conn })
+    }
+
+    /// SQLite's quick integrity check. True when the database is sound.
+    pub fn quick_check(&self) -> Result<bool> {
+        let verdict: String = self.conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        Ok(verdict.eq_ignore_ascii_case("ok"))
+    }
+
+    /// Writes a compact, consistent copy of the database to `dest` (which
+    /// must not exist yet). Safe while the agent keeps running.
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        self.conn.execute("VACUUM INTO ?1", [dest.to_string_lossy()])?;
+        Ok(())
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -136,6 +162,91 @@ impl Store {
         self.conn.execute("DELETE FROM events WHERE ts < ?1", [before_ms])
     }
 
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn settings(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut stmt = self.conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Records a drive's state for `p.day` (one row per drive per day).
+    pub fn add_disk_point(&self, p: &syscura_core::DiskPoint) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO disk_history (day, disk, health, temp_c, wear, hours) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![p.day, p.disk, p.health, p.temperature_c, p.wear_pct, p.power_on_hours.map(|h| h as i64)],
+        )?;
+        Ok(())
+    }
+
+    /// Readings of the last `days` days, oldest first.
+    pub fn disk_history(&self, days: u32) -> Result<Vec<syscura_core::DiskPoint>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT day, disk, health, temp_c, wear, hours FROM disk_history
+             WHERE day >= date('now', ?1) ORDER BY day, disk",
+        )?;
+        let rows = stmt.query_map([format!("-{days} days")], |r| {
+            Ok(syscura_core::DiskPoint {
+                day: r.get(0)?,
+                disk: r.get(1)?,
+                health: r.get(2)?,
+                temperature_c: r.get(3)?,
+                wear_pct: r.get(4)?,
+                power_on_hours: r.get::<_, Option<i64>>(5)?.map(|h| h as u64),
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Counts for the summary of the last `days` days.
+    pub fn summary(&self, days: u32, security_rules: &[String]) -> Result<syscura_core::Summary> {
+        let since = syscura_core::now_ms() - days as i64 * 86_400_000;
+        let one = |sql: &str| -> Result<u64> { self.conn.query_row(sql, [since], |r| r.get::<_, i64>(0)).map(|n| n as u64) };
+        let new_problems = one("SELECT COUNT(*) FROM findings WHERE first_ts >= ?1")?;
+        let fixed_automatically = one(
+            "SELECT COUNT(DISTINCT finding_id) FROM fix_attempts WHERE ts >= ?1 AND automatic = 1 AND ok = 1 AND outcome = 'fixed'",
+        )?;
+        let fixed_by_you = one(
+            "SELECT COUNT(DISTINCT finding_id) FROM fix_attempts WHERE ts >= ?1 AND automatic = 0 AND ok = 1 AND outcome IN ('fixed', 'gone')",
+        )?;
+        let open_problems: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM findings WHERE status IN ('open', 'fix_failed')", [], |r| r.get::<_, i64>(0))
+            .map(|n| n as u64)?;
+        let mut security_problems = 0;
+        let mut highlights = Vec::new();
+        let mut stmt = self.conn.prepare("SELECT rule_id, grp FROM findings WHERE first_ts >= ?1 ORDER BY first_ts DESC")?;
+        for row in stmt.query_map([since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (rule, group) = row?;
+            if security_rules.contains(&rule) {
+                security_problems += 1;
+            }
+            if highlights.len() < 5 {
+                highlights.push(if group.is_empty() { rule } else { format!("{rule}: {group}") });
+            }
+        }
+        Ok(syscura_core::Summary {
+            days,
+            events: self.level_counts_since(since)?,
+            new_problems,
+            fixed_automatically,
+            fixed_by_you,
+            open_problems,
+            security_problems,
+            highlights,
+        })
+    }
+
     /// Timestamp of the oldest stored event, if any.
     pub fn oldest_ts(&self) -> Result<Option<i64>> {
         self.conn
@@ -179,6 +290,50 @@ mod tests {
         let errors = s.recent_events(10, Some(Level::Error)).unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].event.level, Level::Error);
+    }
+
+    #[test]
+    fn backup_copies_everything_and_checks_clean() {
+        let dir = std::env::temp_dir().join(format!("syscura-store-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Store::open(&dir.join("a.db")).unwrap();
+        s.insert_event(&ev(10, 1, Level::Error)).unwrap();
+        assert!(s.quick_check().unwrap());
+        s.backup_to(&dir.join("b.db")).unwrap();
+        let b = Store::open(&dir.join("b.db")).unwrap();
+        assert_eq!(b.count_events().unwrap(), 1);
+        assert!(b.quick_check().unwrap());
+        drop((s, b));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_and_disk_history() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.setting("x").unwrap(), None);
+        s.set_setting("x", "on").unwrap();
+        s.set_setting("x", "off").unwrap();
+        assert_eq!(s.setting("x").unwrap().as_deref(), Some("off"));
+        assert_eq!(s.settings().unwrap().len(), 1);
+        let today: String = s.conn.query_row("SELECT date('now')", [], |r| r.get(0)).unwrap();
+        let p = syscura_core::DiskPoint { day: today, disk: "SSD 1".into(), health: "Healthy".into(), wear_pct: Some(3), ..Default::default() };
+        s.add_disk_point(&p).unwrap();
+        s.add_disk_point(&p).unwrap();
+        let h = s.disk_history(30).unwrap();
+        assert_eq!(h.len(), 1, "one reading per drive per day");
+        assert_eq!(h[0].wear_pct, Some(3));
+    }
+
+    #[test]
+    fn summary_counts() {
+        let s = Store::open_in_memory().unwrap();
+        let now = syscura_core::now_ms();
+        s.record_hit("sec.threat", "x", now, &Default::default()).unwrap();
+        s.record_hit("svc.crash", "y", now, &Default::default()).unwrap();
+        let sum = s.summary(7, &["sec.threat".to_string()]).unwrap();
+        assert_eq!((sum.new_problems, sum.security_problems, sum.open_problems), (2, 1, 2));
+        assert_eq!(sum.highlights.len(), 2);
     }
 
     #[test]

@@ -39,6 +39,42 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+  # Known security holes in dependencies, licenses, and where crates come from.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm audit (what ships in the app)
+        working-directory: ui
+        run: npm audit --omit=dev --audit-level=high
+
+  # Windows on ARM (Snapdragon laptops): build natively, run the tests,
+  # read the hardware and start the agent.
+  arm64:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and test the agent, rules and store
+        run: |
+          cargo build --release -p syscura-agent -p syscura-cli
+          cargo test -p syscura-core -p syscura-rules -p syscura-store -p syscura-sensors -p syscura-agent -p syscura-hw
+      - name: Read this machine's hardware and run Syscura's checks
+        shell: pwsh
+        run: |
+          $hw = & target\release\syscura-agent.exe hwscan | ConvertFrom-Json
+          "Windows: $($hw.os.name) build $($hw.os.build) ($($hw.os.architecture)) · CPU: $($hw.cpus[0].name)"
+          if (-not $hw.os.build) { throw "Windows build not read" }
+          if ($hw.cpus.Count -lt 1) { throw "no processor found" }
+          target\release\syscura-agent.exe selftest
+
   # Runs Syscura on other machines (GitHub's clean Windows VMs: different
   # hardware, no GPU, no battery) to prove it reads them and starts.
   smoke:

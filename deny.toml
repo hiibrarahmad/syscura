@@ -1,0 +1,37 @@
+# cargo-deny: checked in CI on every change.
+#   cargo deny check
+# - advisories: no dependency with a known security hole (RustSec database)
+# - licenses:   only licenses compatible with Syscura's MIT license
+# - sources:    crates only from crates.io
+
+[graph]
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+
+[advisories]
+# Unmaintained crates are reported, but only for crates Syscura uses directly.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+  "MPL-2.0",
+  "0BSD",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

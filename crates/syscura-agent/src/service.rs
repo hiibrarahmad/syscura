@@ -78,15 +78,23 @@ fn run_service(data_dir: std::path::PathBuf) -> Result<(), String> {
 /// Installs and starts the service from this exe. An existing Syscura
 /// service (for example one pointing at an older copy in another folder)
 /// is replaced, so installing again is how you update or move Syscura.
+///
+/// The service runs as SYSTEM, so its program must sit where only
+/// administrators can change it. A copy started from a user folder (the
+/// portable zip in Downloads) is first copied to Program Files\Syscura:
+/// otherwise any program could swap the file and run as SYSTEM.
 pub fn install() -> Result<(), String> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
     )
     .map_err(|e| format!("cannot open the service manager (run as administrator): {e}"))?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut exe = std::env::current_exe().map_err(|e| e.to_string())?;
     if manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS).is_ok() {
         uninstall()?;
+    }
+    if !exe.parent().is_some_and(crate::caller::admin_only_folder) {
+        exe = copy_to_program_files(&exe)?;
     }
     let info = ServiceInfo {
         name: SERVICE_NAME.into(),
@@ -136,6 +144,38 @@ pub fn install() -> Result<(), String> {
         .map_err(|e| format!("service installed but did not start: {e}"))?;
     println!("Installed and started the '{DISPLAY_NAME}' service from {}", exe.display());
     Ok(())
+}
+
+/// Copies Syscura's programs next to `agent` into Program Files\Syscura
+/// and returns the copied agent.
+fn copy_to_program_files(agent: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let dest = crate::caller::install_dir();
+    std::fs::create_dir_all(&dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
+    let src = agent.parent().ok_or("no folder")?;
+    for name in ["syscura-agent.exe", "syscura-cli.exe", "Syscura.exe"] {
+        let from = src.join(name);
+        if !from.exists() {
+            continue;
+        }
+        let to = dest.join(name);
+        // A stopped service or a closing app may hold the file briefly.
+        let mut result = Err(std::io::Error::other("not tried"));
+        for _ in 0..20 {
+            result = std::fs::copy(&from, &to);
+            if result.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        match result {
+            Ok(_) => {}
+            // The agent is required; the others are a convenience.
+            Err(e) if name == "syscura-agent.exe" => return Err(format!("cannot copy the agent to {}: {e}", dest.display())),
+            Err(e) => log::error(&format!("could not copy {name} to {}: {e}", dest.display())),
+        }
+    }
+    println!("Copied Syscura to {} (a service must not run from a folder every program can change).", dest.display());
+    Ok(dest.join("syscura-agent.exe"))
 }
 
 pub fn uninstall() -> Result<(), String> {

@@ -435,7 +435,12 @@ fn acpi_thermal() -> Vec<Sensor> {
 
 pub fn live_sensors(hw: &HardwareInfo) -> Vec<Sensor> {
     let mut out = cpu_activity(hw);
-    let gpu = nvml::gpu_sensors(&hw.gpus);
+    let mut gpu = nvml::gpu_sensors(&hw.gpus);
+    // Intel, AMD and Qualcomm graphics (and NVIDIA without its tools):
+    // Windows' own GPU counters, the numbers Task Manager shows.
+    if gpu.is_empty() && !hw.gpus.is_empty() {
+        gpu.extend(gpu_activity());
+    }
     let have_gpu = !gpu.is_empty();
     out.extend(gpu);
     out.extend(lhm::sensors(hw, have_gpu));
@@ -475,6 +480,51 @@ fn cpu_activity(hw: &HardwareInfo) -> Vec<Sensor> {
         push("CPU clock (average)", SensorKind::Clock, (base * p / 100) as f64, "MHz");
     }
     out
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct GpuEngine {
+    name: Option<String>,
+    #[serde(default)]
+    utilization_percentage: Num,
+}
+
+/// 3D engine load of the busiest graphics adapter, summed over programs.
+/// Works for every GPU vendor on Windows 10 1709 and later.
+fn gpu_activity() -> Vec<Sensor> {
+    let Ok(con) = WMIConnection::new() else { return Vec::new() };
+    let rows: Vec<GpuEngine> = query(
+        &con,
+        "SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine",
+    );
+    match gpu_load(rows.iter().map(|r| (text(r.name.clone()), r.utilization_percentage.0.unwrap_or(0)))) {
+        Some(load) => vec![Sensor {
+            label: "GPU load (3D)".into(),
+            kind: SensorKind::Load,
+            value: Some(load as f64),
+            unit: "%".into(),
+            site: SensorSite::Gpu(0),
+            source: "windows".into(),
+        }],
+        None => Vec::new(),
+    }
+}
+
+/// Sums 3D-engine use per adapter (the "luid_..." part of each counter's
+/// name) and returns the busiest adapter's load, capped at 100.
+pub(crate) fn gpu_load(rows: impl Iterator<Item = (String, u64)>) -> Option<u64> {
+    let mut per: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut any = false;
+    for (name, pct) in rows {
+        if !name.ends_with("engtype_3D") {
+            continue;
+        }
+        any = true;
+        let adapter = name.split("_phys").next().and_then(|n| n.split("luid_").nth(1)).unwrap_or("").to_string();
+        *per.entry(adapter).or_default() += pct;
+    }
+    any.then(|| per.values().copied().max().unwrap_or(0).min(100))
 }
 
 /// Asks the drive whether random access is slow (spinning platters). This
@@ -576,4 +626,28 @@ pub(crate) fn reg_string(key: &HSTRING, value: &str) -> Option<String> {
     }
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     Some(String::from_utf16_lossy(&buf[..len]))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gpu_load_sums_per_adapter() {
+        let rows = vec![
+            ("pid_1_luid_0x0_0xA_phys_0_eng_0_engtype_3D".to_string(), 30),
+            ("pid_2_luid_0x0_0xA_phys_0_eng_0_engtype_3D".to_string(), 25),
+            ("pid_3_luid_0x0_0xB_phys_0_eng_0_engtype_3D".to_string(), 40),
+            ("pid_3_luid_0x0_0xB_phys_0_eng_1_engtype_VideoDecode".to_string(), 90),
+        ];
+        assert_eq!(super::gpu_load(rows.into_iter()), Some(55));
+        assert_eq!(super::gpu_load(std::iter::empty()), None);
+        let busy = vec![("pid_1_luid_0x0_0xA_phys_0_eng_0_engtype_3D".to_string(), 80), ("pid_2_luid_0x0_0xA_phys_0_eng_0_engtype_3D".to_string(), 70)];
+        assert_eq!(super::gpu_load(busy.into_iter()), Some(100));
+    }
+
+    #[test]
+    fn collects_on_any_machine() {
+        let hw = super::collect();
+        assert!(!hw.os.build.is_empty(), "Windows build is always read");
+        assert!(!hw.cpus.is_empty(), "every PC has a processor");
+    }
 }

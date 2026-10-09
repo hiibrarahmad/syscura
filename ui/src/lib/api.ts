@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
-  ActionInfo, AiStatus, Analysis, BackupInfo, Finding, HardwareView, ProcessInfo, Question, Sensor, StatusInfo, StoredEvent,
+  ActionInfo, AiStatus, Analysis, AppUpdate, BackupInfo, DiskPoint, Finding, HardwareView, Prefs, ProcessInfo, Question,
+  SecurityReport, Sensor, StatusInfo, StoredEvent, Summary,
 } from "./types";
 
 export const api = {
@@ -38,6 +39,15 @@ export const api = {
   startAgent: () => invoke<string>("start_agent"),
   installService: () => invoke<string>("install_service"),
   open: (url: string) => openUrl(url),
+  security: (refresh: boolean) => invoke<SecurityReport>("security", { refresh }),
+  agentOptions: () => invoke<Record<string, string>>("agent_options"),
+  setAgentOption: (key: string, value: string) => invoke<string>("set_agent_option", { key, value }),
+  diskHistory: () => invoke<DiskPoint[]>("disk_history"),
+  summary: (days: number) => invoke<Summary>("summary", { days }),
+  outdatedApps: () => invoke<AppUpdate[]>("outdated_apps"),
+  updateApps: (ids: string[]) => invoke<string>("update_apps", { ids }),
+  appPrefs: () => invoke<Prefs>("app_prefs"),
+  setAppPrefs: (prefs: Prefs) => invoke<string>("set_app_prefs", { prefs }),
 };
 
 export function gb(bytes: number, digits = 0): string {

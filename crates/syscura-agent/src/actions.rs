@@ -95,6 +95,9 @@ enum Undo {
     ServiceStartType { service: String, start_type: u32 },
     RenamedFolder { original: PathBuf, backup: PathBuf },
     MovedFiles { from: PathBuf, to: PathBuf, service: String },
+    /// A DWORD under HKLM and its value before (None: it did not exist).
+    RegDword { path: String, value: String, previous: Option<u32> },
+    ControlledFolders,
 }
 
 /// (id, label, description, risk, params, undoable)
@@ -125,6 +128,11 @@ const CATALOG: &[Entry] = &[
     ("chkdsk.scan", "Check drive C: (read-only)", "Runs chkdsk on C: in read-only mode: reports file system problems, changes nothing.", Risk::Safe, &[], false),
     ("wu.reset_cache", "Reset Windows Update's cache", "Renames Windows Update's download cache so it is rebuilt (undo renames it back). Fixes many update failures.", Risk::Caution, &[], true),
     ("restore_point", "Create a restore point", "Creates a System Restore point.", Risk::Safe, &[], false),
+    ("firewall.enable", "Turn Windows Firewall on", "Turns Windows Firewall on for every network type (netsh advfirewall set allprofiles state on).", Risk::Caution, &[], false),
+    ("rdp.disable", "Turn Remote Desktop off", "Stops this PC from accepting Remote Desktop sign-ins (undo turns it back on).", Risk::Caution, &[], true),
+    ("smb1.disable", "Remove SMBv1", "Removes the old SMBv1 file-sharing protocol (WannaCry spread through it). A very old NAS or printer may then stop sharing files. Needs a restart.", Risk::Risky, &[], false),
+    ("driverblocklist.enable", "Turn on the vulnerable driver blocklist", "Turns on Microsoft's list of drivers with known security holes, so they cannot load (undo turns it off). Needs a restart.", Risk::Caution, &[], true),
+    ("defender.enable_cfa", "Turn on Controlled folder access", "Lets only trusted programs change Documents, Pictures, Desktop and other protected folders: Windows' own ransomware protection (undo turns it off).", Risk::Caution, &[], true),
 ];
 
 pub fn catalog() -> Vec<ActionInfo> {
@@ -235,6 +243,21 @@ pub fn run(action: &str, p: &BTreeMap<String, String>) -> Result<Outcome, String
         "winsock.reset" => tool(&system32("netsh.exe"), &["winsock", "reset"], 120)
             .map(|m| done(format!("{m} A restart is needed to finish."))),
         "wu.reset_cache" => reset_update_cache(),
+        "firewall.enable" => tool(&system32("netsh.exe"), &["advfirewall", "set", "allprofiles", "state", "on"], 120).map(done),
+        "rdp.disable" => set_dword(r"SYSTEM\CurrentControlSet\Control\Terminal Server", "fDenyTSConnections", 1, "Remote Desktop is off."),
+        "driverblocklist.enable" => set_dword(
+            r"SYSTEM\CurrentControlSet\Control\CI\Config",
+            "VulnerableDriverBlocklistEnable",
+            1,
+            "The vulnerable driver blocklist is on after the next restart.",
+        ),
+        "smb1.disable" => powershell("Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart | Out-Null; 'SMBv1 is removed. Restart the PC to finish.'")
+            .map(done),
+        "defender.enable_cfa" => powershell("Set-MpPreference -EnableControlledFolderAccess Enabled; 'Controlled folder access is on.'").map(|m| Outcome {
+            message: m,
+            undo: serde_json::to_string(&Undo::ControlledFolders).ok(),
+            effect: Effect::Fixed,
+        }),
         "restore_point" => powershell(
             "Checkpoint-Computer -Description 'Syscura: before a fix' -RestorePointType MODIFY_SETTINGS",
         )
@@ -263,6 +286,14 @@ pub fn undo(token: &str) -> Result<String, String> {
                 Ok(())
             })?;
             Ok(format!("Moved the print jobs back to {}.", from.display()))
+        }
+        Undo::RegDword { path, value, previous } => {
+            crate::reg::set_dword_hklm(&path, &value, previous)?;
+            Ok(format!("Restored the previous {value} setting."))
+        }
+        Undo::ControlledFolders => {
+            powershell("Set-MpPreference -EnableControlledFolderAccess Disabled")?;
+            Ok("Controlled folder access is off again.".into())
         }
         Undo::RenamedFolder { original, backup } => {
             if !backup.exists() {
@@ -499,6 +530,14 @@ fn with_services_stopped<T>(keys: &[&str], f: impl FnOnce() -> Result<T, String>
         let _ = ensure_running(k);
     }
     result
+}
+
+/// Sets a DWORD under HKLM; undo puts the old value (or its absence) back.
+fn set_dword(path: &str, value: &str, data: u32, message: &str) -> Result<Outcome, String> {
+    let previous = crate::reg::dword(crate::reg::HKEY_LOCAL_MACHINE, path, value);
+    crate::reg::set_dword_hklm(path, value, Some(data))?;
+    let undo = serde_json::to_string(&Undo::RegDword { path: path.into(), value: value.into(), previous }).ok();
+    Ok(Outcome { message: message.into(), undo, effect: Effect::Fixed })
 }
 
 // ------------------------------------------------------------- Windows Update

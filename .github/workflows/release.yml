@@ -203,7 +203,8 @@ jobs:
           $version = $tag.TrimStart('v')
           # Release notes: this version's section of the changelog.
           $log = Get-Content CHANGELOG.md -Raw
-          $m = [regex]::Match($log, "(?ms)^## $([regex]::Escape($version))\s*$(.*?)(?=^## )")
+          $pattern = '(?ms)^## ' + [regex]::Escape($version) + '\s*$(.*?)(?=^## )'
+          $m = [regex]::Match($log, $pattern)
           $notes = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "Syscura $version" }
           Set-Content notes.md $notes -Encoding utf8
           $flags = @('--draft', '--title', "Syscura $version", '--notes-file', 'notes.md')
